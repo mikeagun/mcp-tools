@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ci-debug-mcp</AssemblyName>
+    <RootNamespace>CiDebugMcp</RootNamespace>
+    <Version>0.1.0</Version>
+    <Description>MCP server for CI/CD log search, failure triage, and binary dependency analysis.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\McpSharp\McpSharp.csproj" />
+  </ItemGroup>
+
+</Project>

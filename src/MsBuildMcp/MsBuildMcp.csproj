@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>msbuild-mcp</AssemblyName>
+    <RootNamespace>MsBuildMcp</RootNamespace>
+    <Version>0.1.0</Version>
+    <Description>MCP server that gives LLM agents structured access to MSBuild solutions, projects, dependency graphs, and build execution.</Description>
+    <Authors>Microsoft</Authors>
+    <PackageProjectUrl>https://github.com/microsoft/mcp-tools</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/microsoft/mcp-tools</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <!-- Microsoft.Build 17.x compile-time reference; actual MSBuild comes from MSBuildLocator at runtime -->
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MsBuildMcp.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\McpSharp\McpSharp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Build" Version="17.12.6" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.7.8" />
+    <!-- Required at runtime by VS MSBuild evaluation — ExcludeAssets on Microsoft.Build prevents transitive resolution -->
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="9.0.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>McpSharp</RootNamespace>
+    <AssemblyName>McpSharp</AssemblyName>
+    <Version>0.1.0</Version>
+    <Authors>McpSharp contributors</Authors>
+    <Description>Lightweight MCP (Model Context Protocol) server library for .NET. Provides JSON-RPC 2.0 stdio transport with auto-detection of Content-Length and NDJSON framing, plus a registry for tools, resources, and prompts.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>mcp json-rpc dotnet llm ai tools</PackageTags>
+  </PropertyGroup>
+
+</Project>
