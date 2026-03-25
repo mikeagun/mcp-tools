@@ -15,13 +15,14 @@ public sealed class GitHubClient : IGitHubApi
     private readonly LogCache _cache;
     private bool _authResolved;
 
-    public GitHubClient(LogCache cache)
+    public GitHubClient(LogCache cache, int timeoutSeconds = 50)
     {
         _cache = cache;
 
         _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true })
         {
             BaseAddress = new Uri("https://api.github.com"),
+            Timeout = TimeSpan.FromSeconds(timeoutSeconds),
         };
         _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ci-debug-mcp", "0.1"));
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.v3+json"));
@@ -189,6 +190,10 @@ public sealed class GitHubClient : IGitHubApi
         {
             var psi = new ProcessStartInfo("git", $"config --get {key}")
             {
+                // RedirectStandardInput prevents child from inheriting the parent's
+                // stdin pipe, which causes git.exe to hang when the parent is an MCP
+                // server with piped stdin (git spawns conhost.exe that blocks).
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -212,6 +217,9 @@ public sealed class GitHubClient : IGitHubApi
         {
             var psi = new ProcessStartInfo("gh", "auth token")
             {
+                // RedirectStandardInput prevents child from inheriting the parent's
+                // stdin pipe (same issue as GetGitConfigValue — see comment there).
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
