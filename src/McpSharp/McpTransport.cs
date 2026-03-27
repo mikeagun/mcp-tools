@@ -11,7 +11,14 @@ namespace McpSharp;
 /// <summary>
 /// MCP JSON-RPC 2.0 transport over stdio.
 /// Supports Content-Length framing and NDJSON, auto-detected from first byte.
-/// A dedicated reader thread owns the input stream; consumers use TakeMessage().
+///
+/// Architecture:
+///   - A single reader thread reads from the input stream and classifies each message:
+///     • Requests/notifications (has "method") → _requestQueue → consumed by Run()
+///     • Responses (has "result"/"error", no "method") → routed to a waiting
+///       Elicit() call via _responseWaiters
+///   - This split eliminates competing readers between Run() and Elicit().
+///   - WriteMessage is thread-safe (locked) for concurrent handler dispatch.
 /// </summary>
 public sealed class McpTransport
 {
@@ -22,8 +29,18 @@ public sealed class McpTransport
 
     private enum Framing { Unknown, ContentLength, Ndjson }
 
-    // Single reader thread feeds this collection. All consumers read from here.
-    private readonly BlockingCollection<JsonNode> _messageQueue = new();
+    // Inbound requests and notifications — consumed only by Run().
+    private readonly BlockingCollection<JsonNode> _requestQueue = new();
+
+    // Inbound responses — routed to waiting Elicit() calls by request ID.
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonNode>> _responseWaiters = new();
+
+    // Responses that arrived before their waiter was registered.
+    private readonly ConcurrentDictionary<string, JsonNode> _earlyResponses = new();
+
+    // Synchronizes waiter registration with early response buffering.
+    private readonly object _responseRoutingLock = new();
+
     private Thread? _readerThread;
 
     public McpTransport(Stream input, Stream output, string? logPrefix = null)
@@ -35,7 +52,8 @@ public sealed class McpTransport
 
     /// <summary>
     /// Start the background reader thread that owns the input stream.
-    /// Must be called before Run() or TakeMessage(). Called automatically by Run().
+    /// Classifies messages and routes them to the appropriate queue.
+    /// Called automatically by Run().
     /// </summary>
     public void StartReader()
     {
@@ -47,8 +65,26 @@ public sealed class McpTransport
                 while (true)
                 {
                     var msg = ReadMessage();
-                    if (msg == null) break; // EOF / connection closed.
-                    _messageQueue.Add(msg);
+                    if (msg == null) break;
+
+                    if (IsResponse(msg))
+                    {
+                        var id = msg["id"]?.GetValue<string>();
+                        if (id != null)
+                        {
+                            lock (_responseRoutingLock)
+                            {
+                                if (_responseWaiters.TryRemove(id, out var tcs))
+                                    tcs.TrySetResult(msg);
+                                else
+                                    _earlyResponses[id] = msg;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _requestQueue.Add(msg);
+                    }
                 }
             }
             catch (Exception ex)
@@ -57,105 +93,158 @@ public sealed class McpTransport
             }
             finally
             {
-                _messageQueue.CompleteAdding();
+                _requestQueue.CompleteAdding();
+                // Complete any waiting elicitations.
+                foreach (var kvp in _responseWaiters)
+                {
+                    if (_responseWaiters.TryRemove(kvp.Key, out var tcs))
+                        tcs.TrySetCanceled();
+                }
             }
         }) { IsBackground = true, Name = $"{_logPrefix}-reader" };
         _readerThread.Start();
     }
 
     /// <summary>
-    /// Take the next message from the queue. Blocks until a message is available
-    /// or the reader thread has finished (returns null).
+    /// Classify a message as a response (has "result" or "error", no "method").
     /// </summary>
-    public JsonNode? TakeMessage()
+    private static bool IsResponse(JsonNode msg)
     {
-        try { return _messageQueue.Take(); }
-        catch (InvalidOperationException) { return null; } // CompleteAdding was called.
+        var obj = msg.AsObject();
+        return !obj.ContainsKey("method")
+            && (obj.ContainsKey("result") || obj.ContainsKey("error"));
+    }
+
+    // ── Response waiters (used by Elicit()) ─────────────────────
+
+    /// <summary>
+    /// Register a waiter for a server-initiated request response.
+    /// The reader thread will complete the TCS when a response with the matching ID arrives.
+    /// </summary>
+    internal void RegisterResponseWaiter(string requestId, TaskCompletionSource<JsonNode> tcs)
+    {
+        lock (_responseRoutingLock)
+        {
+            if (_earlyResponses.TryRemove(requestId, out var earlyResponse))
+            {
+                tcs.TrySetResult(earlyResponse);
+                return;
+            }
+            _responseWaiters[requestId] = tcs;
+        }
     }
 
     /// <summary>
-    /// Try to take a message with a timeout and cancellation token.
-    /// Returns null if the timeout expires or cancellation is requested.
+    /// Remove a response waiter (e.g., on timeout before the response arrives).
+    /// </summary>
+    internal void UnregisterResponseWaiter(string requestId)
+    {
+        _responseWaiters.TryRemove(requestId, out _);
+    }
+
+    // ── Request queue (used by Run()) ───────────────────────────
+
+    /// <summary>
+    /// Take the next request from the queue. Blocks until available or reader finishes (returns null).
+    /// </summary>
+    public JsonNode? TakeMessage()
+    {
+        try { return _requestQueue.Take(); }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    /// <summary>
+    /// Try to take a request with a timeout and cancellation token.
     /// </summary>
     public JsonNode? TakeMessage(int timeoutMs, CancellationToken ct = default)
     {
         try
         {
-            return _messageQueue.TryTake(out var msg, timeoutMs, ct) ? msg : null;
+            return _requestQueue.TryTake(out var msg, timeoutMs, ct) ? msg : null;
         }
         catch (OperationCanceledException) { return null; }
         catch (InvalidOperationException) { return null; }
     }
 
-    // Messages returned by Elicit() that need to be re-consumed by Run().
-    private readonly ConcurrentQueue<JsonNode> _returnedMessages = new();
+    // ── Main event loop ────────────────────────────────────────
 
     /// <summary>
-    /// Return a message to the front of the queue (for messages consumed by
-    /// Elicit() that belong to Run() — e.g., parallel tool calls).
+    /// Main event loop. Reads requests from the queue and dispatches to the handler.
+    /// When concurrent is true, handlers run on ThreadPool threads, allowing
+    /// blocking tools (like poll_messages) without starving other requests.
+    /// Elicitation works correctly in both modes because responses are routed
+    /// to Elicit() via _responseWaiters, not through this queue.
     /// </summary>
-    internal void ReturnMessage(JsonNode msg) => _returnedMessages.Enqueue(msg);
-
-    /// <summary>
-    /// Main event loop. Reads requests, dispatches to handler, writes responses.
-    /// </summary>
-    public void Run(Func<string, JsonNode?, JsonNode?> handler)
+    public void Run(Func<string, JsonNode?, JsonNode?> handler, bool concurrent = false)
     {
         StartReader();
 
         while (true)
         {
-            // Check returned messages first (from Elicit() consuming non-response messages).
-            if (!_returnedMessages.TryDequeue(out var request))
-                request = TakeMessage();
-
+            var request = TakeMessage();
             if (request == null) break;
 
             var method = request["method"]?.GetValue<string>() ?? "";
             var parameters = request["params"];
             var isNotification = !request.AsObject().ContainsKey("id") || request["id"] is null;
 
-            try
+            if (concurrent)
             {
-                var result = handler(method, parameters);
-                if (!isNotification)
-                {
-                    var response = new JsonObject
-                    {
-                        ["jsonrpc"] = "2.0",
-                        ["id"] = JsonNode.Parse(request["id"]!.ToJsonString()),
-                        ["result"] = result is not null
-                            ? JsonNode.Parse(result.ToJsonString())
-                            : null,
-                    };
-                    WriteMessage(response);
-                }
+                var idJson = isNotification ? null : request["id"]!.ToJsonString();
+                ThreadPool.QueueUserWorkItem(_ =>
+                    DispatchAndRespond(handler, method, parameters, isNotification, idJson));
             }
-            catch (Exception ex)
+            else
             {
-                if (!isNotification)
-                {
-                    var errorResponse = new JsonObject
-                    {
-                        ["jsonrpc"] = "2.0",
-                        ["id"] = JsonNode.Parse(request["id"]!.ToJsonString()),
-                        ["error"] = new JsonObject
-                        {
-                            ["code"] = -32603,
-                            ["message"] = ex.Message,
-                        }
-                    };
-                    WriteMessage(errorResponse);
-                }
-                else
-                {
-                    Console.Error.WriteLine($"{_logPrefix}: notification error: {ex.Message}");
-                }
+                DispatchAndRespond(handler, method, parameters, isNotification,
+                    isNotification ? null : request["id"]!.ToJsonString());
             }
         }
     }
 
-    // ── Stream reading (used by reader thread; also public for test setups) ──
+    private void DispatchAndRespond(Func<string, JsonNode?, JsonNode?> handler,
+        string method, JsonNode? parameters, bool isNotification, string? idJson)
+    {
+        try
+        {
+            var result = handler(method, parameters);
+            if (!isNotification)
+            {
+                var response = new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"] = JsonNode.Parse(idJson!),
+                    ["result"] = result is not null
+                        ? JsonNode.Parse(result.ToJsonString())
+                        : null,
+                };
+                WriteMessage(response);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!isNotification)
+            {
+                var errorResponse = new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"] = JsonNode.Parse(idJson!),
+                    ["error"] = new JsonObject
+                    {
+                        ["code"] = -32603,
+                        ["message"] = ex.Message,
+                    }
+                };
+                WriteMessage(errorResponse);
+            }
+            else
+            {
+                Console.Error.WriteLine($"{_logPrefix}: notification error: {ex.Message}");
+            }
+        }
+    }
+
+    // ── Stream reading (used by reader thread) ──────────────────
 
     /// <summary>
     /// Read a single message directly from the input stream (blocking).
@@ -278,22 +367,27 @@ public sealed class McpTransport
         return sb.Length > 0 ? sb.ToString() : null;
     }
 
+    private readonly Lock _writeLock = new();
+
     public void WriteMessage(JsonNode msg)
     {
         var body = msg.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
         var bodyBytes = Encoding.UTF8.GetBytes(body);
 
-        if (_framing == Framing.Ndjson)
+        lock (_writeLock)
         {
-            _output.Write(bodyBytes);
-            _output.WriteByte((byte)'\n');
+            if (_framing == Framing.Ndjson)
+            {
+                _output.Write(bodyBytes);
+                _output.WriteByte((byte)'\n');
+            }
+            else
+            {
+                var header = $"Content-Length: {bodyBytes.Length}\r\n\r\n";
+                _output.Write(Encoding.UTF8.GetBytes(header));
+                _output.Write(bodyBytes);
+            }
+            _output.Flush();
         }
-        else
-        {
-            var header = $"Content-Length: {bodyBytes.Length}\r\n\r\n";
-            _output.Write(Encoding.UTF8.GetBytes(header));
-            _output.Write(bodyBytes);
-        }
-        _output.Flush();
     }
 }

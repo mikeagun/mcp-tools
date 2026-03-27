@@ -182,3 +182,211 @@ public class BuildToolsTests
         Assert.Equal(expectedClamped, wasClamped);
     }
 }
+
+public class OutputBufferTests : IDisposable
+{
+    private readonly List<OutputBuffer> _buffers = [];
+
+    private OutputBuffer CreateBuffer(string mode = "full")
+    {
+        var buf = new OutputBuffer(mode, $"test-{_buffers.Count}");
+        _buffers.Add(buf);
+        return buf;
+    }
+
+    public void Dispose()
+    {
+        foreach (var b in _buffers) b.Dispose();
+    }
+
+    [Fact]
+    public void FullMode_RetainsAllLines()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 100; i++)
+            buf.AddLine($"line {i}");
+
+        Assert.Equal(100, buf.TotalLinesReceived);
+        Assert.Equal(100, buf.RetainedLineCount);
+        Assert.Equal(1, buf.FirstAvailableLine);
+        Assert.False(buf.HasDiskSpill);
+    }
+
+    [Fact]
+    public void TailMode_EvictsOldLines()
+    {
+        var buf = CreateBuffer("tail");
+        for (int i = 1; i <= 2000; i++)
+            buf.AddLine($"line {i}");
+
+        Assert.Equal(2000, buf.TotalLinesReceived);
+        Assert.Equal(1000, buf.RetainedLineCount); // TailModeMaxLines
+        Assert.Equal(1001, buf.FirstAvailableLine);
+        Assert.False(buf.HasDiskSpill);
+    }
+
+    [Fact]
+    public void GetTail_ReturnsLastNLines()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 50; i++)
+            buf.AddLine($"line {i}");
+
+        var slice = buf.GetTail(10);
+        Assert.Equal(10, slice.Lines.Count);
+        Assert.Equal("line 41", slice.Lines[0]);
+        Assert.Equal("line 50", slice.Lines[9]);
+        Assert.Equal(41, slice.FromLine);
+        Assert.Equal(50, slice.ToLine);
+    }
+
+    [Fact]
+    public void GetLines_ReturnsRange()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 50; i++)
+            buf.AddLine($"line {i}");
+
+        var slice = buf.GetLines(10, 15);
+        Assert.Equal(6, slice.Lines.Count);
+        Assert.Equal("line 10", slice.Lines[0]);
+        Assert.Equal("line 15", slice.Lines[5]);
+    }
+
+    [Fact]
+    public void GetAroundLine_CentersCorrectly()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 100; i++)
+            buf.AddLine($"line {i}");
+
+        var slice = buf.GetAroundLine(50, 10);
+        Assert.Equal(10, slice.Lines.Count);
+        Assert.Contains("line 50", slice.Lines);
+    }
+
+    [Fact]
+    public void Search_FindsMatchesWithContext()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 20; i++)
+            buf.AddLine(i == 10 ? "error C2039: not found" : $"normal line {i}");
+
+        var result = buf.Search("error C\\d+", contextLines: 2);
+
+        Assert.Equal(1, result.TotalMatches);
+        Assert.Single(result.Matches);
+        Assert.Equal(10, result.Matches[0].Line);
+        Assert.Contains("C2039", result.Matches[0].Text);
+        Assert.True(result.Matches[0].Context.Count > 0);
+    }
+
+    [Fact]
+    public void Search_Pagination()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 50; i++)
+            buf.AddLine($"error line {i}");
+
+        var result = buf.Search("error", maxResults: 10, skip: 5);
+
+        Assert.Equal(50, result.TotalMatches);
+        Assert.Equal(10, result.Matches.Count);
+        Assert.Equal(6, result.Matches[0].Line); // 1-indexed, skipped 5
+    }
+
+    [Fact]
+    public void FindFirstMatch_ReturnsLineNumber()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 20; i++)
+            buf.AddLine(i == 15 ? "FATAL ERROR here" : $"ok {i}");
+
+        var line = buf.FindFirstMatch("FATAL");
+        Assert.Equal(15, line);
+    }
+
+    [Fact]
+    public void SaveTo_WritesAllLines()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 10; i++)
+            buf.AddLine($"line {i}");
+
+        var path = Path.Combine(Path.GetTempPath(), $"msbuild-mcp-test-{Guid.NewGuid()}.txt");
+        try
+        {
+            var (written, bytes) = buf.SaveTo(path);
+            Assert.Equal(10, written);
+            Assert.True(bytes > 0);
+            var fileLines = File.ReadAllLines(path);
+            Assert.Equal(10, fileLines.Length);
+            Assert.Equal("line 1", fileLines[0]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Free_ClearsBuffer()
+    {
+        var buf = CreateBuffer();
+        for (int i = 1; i <= 10; i++)
+            buf.AddLine($"line {i}");
+
+        var freed = buf.Free();
+        Assert.Equal(10, freed);
+        Assert.True(buf.IsFreed);
+        Assert.Equal(0, buf.RetainedLineCount);
+
+        // Search after free returns empty
+        var result = buf.Search("line");
+        Assert.Empty(result.Matches);
+        Assert.True(result.Freed);
+    }
+
+    [Fact]
+    public void OutputLine_SetOnParsedDiagnostics()
+    {
+        // Verify that the BuildDiagnostic can carry OutputLine
+        var diag = new BuildDiagnostic
+        {
+            File = "test.cpp",
+            Severity = DiagnosticSeverity.Error,
+            Code = "C2039",
+            Message = "test error",
+            OutputLine = 42,
+        };
+        Assert.Equal(42, diag.OutputLine);
+    }
+
+    [Fact]
+    public void DiagnosticToJson_IncludesOutputLine()
+    {
+        var status = new BuildStatus
+        {
+            BuildId = "test-1",
+            Status = "failed",
+            ElapsedMs = 1000,
+            ErrorCount = 1,
+            WarningCount = 0,
+            Errors = [new BuildDiagnostic
+            {
+                File = "test.cpp",
+                Line = 10,
+                Severity = DiagnosticSeverity.Error,
+                Code = "C2039",
+                Message = "test",
+                OutputLine = 527,
+            }],
+            Warnings = [],
+            Command = "msbuild test.sln",
+        };
+
+        var json = BuildTools.StatusToJson(status);
+        var error = json["errors"]![0]!;
+        Assert.Equal(527, error["output_line"]!.GetValue<int>());
+    }
+}

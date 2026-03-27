@@ -101,7 +101,7 @@ public class EndToEndTests : IDisposable
         var toolsResult = SendRequest("tools/list");
         Assert.NotNull(toolsResult);
         var tools = toolsResult!["tools"]!.AsArray();
-        Assert.Equal(13, tools.Count);
+        Assert.Equal(16, tools.Count);
 
         var names = tools.Select(t => t!["name"]!.GetValue<string>()).OrderBy(x => x).ToList();
         Assert.Contains("list_projects", names);

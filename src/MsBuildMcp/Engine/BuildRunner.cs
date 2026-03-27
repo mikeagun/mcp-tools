@@ -18,7 +18,6 @@ public sealed class BuildJob : IDisposable
         @"^\s*\d+>Project ""([^""]+)"" on node \d+",
         RegexOptions.Compiled);
 
-    private const int RingBufferCapacity = 1000;
     private const int MaxErrors = 500;
     private const int MaxWarnings = 200;
 
@@ -27,6 +26,7 @@ public sealed class BuildJob : IDisposable
     public string SolutionPath { get; }
     public string? Targets { get; }
     public DateTime StartTime { get; } = DateTime.UtcNow;
+    public OutputBuffer Output { get; }
 
     private readonly Process _process;
     private readonly Task _readerTask;
@@ -35,7 +35,7 @@ public sealed class BuildJob : IDisposable
     // Incremental state (guarded by _lock)
     private readonly List<BuildDiagnostic> _errors = [];
     private readonly List<BuildDiagnostic> _warnings = [];
-    private readonly LinkedList<string> _ringBuffer = new();
+    private int _lineCounter;
     private int _projectsStarted;
     private int _projectsCompleted;
     private string? _currentProject;
@@ -47,12 +47,13 @@ public sealed class BuildJob : IDisposable
     private readonly ManualResetEventSlim _newsEvent = new(false);
 
     public BuildJob(ProcessStartInfo psi, string buildId, string command,
-        string solutionPath, string? targets)
+        string solutionPath, string? targets, string retention = "full")
     {
         BuildId = buildId;
         Command = command;
         SolutionPath = solutionPath;
         Targets = targets;
+        Output = new OutputBuffer(retention, buildId);
         _process = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start MSBuild");
         _readerTask = Task.Run(ReadOutputLoop);
@@ -112,19 +113,31 @@ public sealed class BuildJob : IDisposable
     {
         lock (_lock)
         {
-            // Ring buffer
-            _ringBuffer.AddLast(line);
-            if (_ringBuffer.Count > RingBufferCapacity)
-                _ringBuffer.RemoveFirst();
+            _lineCounter++;
+            Output.AddLine(line);
 
             // Parse errors/warnings
             var diagnostics = ErrorParser.Parse(line);
             foreach (var d in diagnostics)
             {
-                if (d.Severity == DiagnosticSeverity.Error && _errors.Count < MaxErrors)
-                    _errors.Add(d);
-                else if (d.Severity == DiagnosticSeverity.Warning && _warnings.Count < MaxWarnings)
-                    _warnings.Add(d);
+                // Create a copy with OutputLine set
+                var withLine = new BuildDiagnostic
+                {
+                    File = d.File,
+                    Line = d.Line,
+                    Column = d.Column,
+                    Severity = d.Severity,
+                    Code = d.Code,
+                    Message = d.Message,
+                    Project = d.Project,
+                    RawLine = d.RawLine,
+                    OutputLine = _lineCounter,
+                };
+
+                if (withLine.Severity == DiagnosticSeverity.Error && _errors.Count < MaxErrors)
+                    _errors.Add(withLine);
+                else if (withLine.Severity == DiagnosticSeverity.Warning && _warnings.Count < MaxWarnings)
+                    _warnings.Add(withLine);
             }
 
             // Track project progress
@@ -214,8 +227,8 @@ public sealed class BuildJob : IDisposable
 
             if (includeOutput)
             {
-                var lines = _ringBuffer.ToList();
-                result.OutputTail = lines.Skip(Math.Max(0, lines.Count - outputLines)).ToList();
+                var tail = Output.GetTail(outputLines);
+                result.OutputTail = tail.Lines;
             }
 
             return result;
@@ -242,6 +255,7 @@ public sealed class BuildJob : IDisposable
         Cancel();
         _newsEvent.Dispose();
         _process.Dispose();
+        Output.Dispose();
     }
 }
 
@@ -269,7 +283,8 @@ public sealed class BuildManager : IDisposable
         bool restore,
         string? additionalArgs,
         int timeoutSeconds,
-        int? projectsTotal = null)
+        int? projectsTotal = null,
+        string retention = "full")
     {
         var toolchain = _toolchain.Value;
         var normalizedSln = Path.GetFullPath(solutionPath);
@@ -321,7 +336,7 @@ public sealed class BuildManager : IDisposable
         var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";
         var command = $"{toolchain.MsBuildPath} {string.Join(" ", args)}";
 
-        var newJob = new BuildJob(psi, buildId, command, normalizedSln, targets);
+        var newJob = new BuildJob(psi, buildId, command, normalizedSln, targets, retention);
 
         lock (_lock)
         {
@@ -404,6 +419,29 @@ public sealed class BuildManager : IDisposable
     public bool HasRunningBuild
     {
         get { lock (_lock) { return _currentBuild != null && !_currentBuild.IsCompleted; } }
+    }
+
+    /// <summary>
+    /// Get the OutputBuffer for the current or specified build.
+    /// Returns null if no build found.
+    /// </summary>
+    public OutputBuffer? GetBuildOutput(string? buildId = null)
+    {
+        lock (_lock)
+        {
+            if (_currentBuild != null &&
+                (buildId == null || _currentBuild.BuildId == buildId))
+                return _currentBuild.Output;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Get the build ID of the current or most recent build.
+    /// </summary>
+    public string? GetCurrentBuildId()
+    {
+        lock (_lock) { return _currentBuild?.BuildId; }
     }
 
     /// <summary>

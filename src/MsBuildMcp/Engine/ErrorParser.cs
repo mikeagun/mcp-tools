@@ -56,6 +56,8 @@ public sealed class BuildDiagnostic
     public required string Message { get; init; }
     public string? Project { get; init; }
     public string? RawLine { get; init; }
+    /// <summary>Line number in the build output where this diagnostic appeared (1-indexed).</summary>
+    public int? OutputLine { get; init; }
 }
 
 public enum DiagnosticSeverity

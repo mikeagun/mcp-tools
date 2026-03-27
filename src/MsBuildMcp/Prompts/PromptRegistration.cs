@@ -72,6 +72,11 @@ public static class PromptRegistration
                     3. Suggest a fix order: fix errors in dependency order (headers → implementations → tests).
                     4. For each root cause error, explain what likely caused it and how to fix it.
                     5. If errors mention a specific project, that project's dependencies may need rebuilding first.
+
+                    ## Context Navigation
+                    If these errors came from a build tool call, each error includes an output_line field.
+                    Use get_build_output(around_line=<output_line>) to see surrounding build context.
+                    Use search_build_output(pattern="...") to find related patterns in the full build log.
                     """;
 
                 return new JsonArray
@@ -106,12 +111,40 @@ public static class PromptRegistration
                     Name = "changed_files",
                     Description = "Comma-separated list of changed file paths",
                     Required = true,
+                },
+                new PromptArgument
+                {
+                    Name = "configuration",
+                    Description = "Build configuration (e.g. Debug, Release). Default: Debug",
+                    Required = false,
+                },
+                new PromptArgument
+                {
+                    Name = "platform",
+                    Description = "Build platform (e.g. x64, Any CPU). Default: x64",
+                    Required = false,
+                },
+                new PromptArgument
+                {
+                    Name = "restore",
+                    Description = "Include NuGet restore in the build command (true/false). Default: false",
+                    Required = false,
+                },
+                new PromptArgument
+                {
+                    Name = "additional_args",
+                    Description = "Additional MSBuild arguments (e.g. '/p:Analysis=True', '/v:detailed')",
+                    Required = false,
                 }
             ],
             Handler = args =>
             {
                 var slnPath = args["sln_path"]?.GetValue<string>() ?? "";
                 var filesStr = args["changed_files"]?.GetValue<string>() ?? "";
+                var config = args["configuration"]?.GetValue<string>() ?? "Debug";
+                var platform = args["platform"]?.GetValue<string>() ?? "x64";
+                var restore = args["restore"]?.GetValue<string>()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
+                var additionalArgs = args["additional_args"]?.GetValue<string>();
                 var files = filesStr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
                 var solution = slnEngine.Parse(slnPath);
@@ -125,7 +158,7 @@ public static class PromptRegistration
                         var projFullPath = Path.GetFullPath(Path.Combine(solution.Directory, proj.RelativePath));
                         try
                         {
-                            var snapshot = projEngine.Evaluate(projFullPath, "Debug", "x64");
+                            var snapshot = projEngine.Evaluate(projFullPath, config, platform);
                             var projDir = Path.GetDirectoryName(projFullPath)!;
                             foreach (var (_, items) in snapshot.Items)
                             {
@@ -147,6 +180,9 @@ public static class PromptRegistration
                 var targets = string.Join(",", affectedProjects.OrderBy(x => x));
                 var fileList = string.Join("\n", files.Select(f => $"  - {f}"));
 
+                var restoreFlag = restore ? " -Restore" : "";
+                var addlArgsStr = !string.IsNullOrEmpty(additionalArgs) ? $" {additionalArgs}" : "";
+
                 var prompt = $"""
                     The following files were changed:
                     {fileList}
@@ -155,7 +191,10 @@ public static class PromptRegistration
                       {targets}
 
                     Suggested build command:
-                      msbuild "{slnPath}" /m /p:Configuration=Debug /p:Platform=x64 /t:"{targets}"
+                      msbuild "{slnPath}" /m /p:Configuration="{config}" /p:Platform="{platform}" /t:"{targets}"{restoreFlag}{addlArgsStr}
+
+                    Or using the build tool:
+                      build(sln_path="{slnPath}", targets="{targets}", configuration="{config}", platform="{platform}"{(restore ? ", restore=true" : "")}{(!string.IsNullOrEmpty(additionalArgs) ? $", additional_args=\"{additionalArgs}\"" : "")})
 
                     If any changed files are headers (.h/.hpp), consider that dependent projects may also need rebuilding.
                     Use the get_dependency_graph tool to check for transitive dependents if needed.
@@ -193,24 +232,39 @@ public static class PromptRegistration
                     Name = "file_path",
                     Description = "Path to the file being changed",
                     Required = true,
+                },
+                new PromptArgument
+                {
+                    Name = "configuration",
+                    Description = "Build configuration (e.g. Debug, Release). Default: Debug",
+                    Required = false,
+                },
+                new PromptArgument
+                {
+                    Name = "platform",
+                    Description = "Build platform (e.g. x64, Any CPU). Default: x64",
+                    Required = false,
                 }
             ],
             Handler = args =>
             {
                 var slnPath = args["sln_path"]?.GetValue<string>() ?? "";
                 var filePath = args["file_path"]?.GetValue<string>() ?? "";
+                var config = args["configuration"]?.GetValue<string>() ?? "Debug";
+                var platform = args["platform"]?.GetValue<string>() ?? "x64";
 
                 var prompt = $"""
                     Analyze the impact of changing this file: {filePath}
 
                     Use the following tools to build a complete picture:
-                    1. Call find_project_for_file to find which project(s) compile this file
-                    2. Call get_dependency_graph to find the full dependency tree
+                    1. Call find_project_for_file(sln_path="{slnPath}", file_path="{filePath}", configuration="{config}", platform="{platform}") to find which project(s) compile this file
+                    2. Call get_dependency_graph(sln_path="{slnPath}", configuration="{config}", platform="{platform}") to find the full dependency tree
                     3. Identify all transitive dependents of the affected project(s)
                     4. Check which of those dependents are test projects (name contains "test")
                     5. Suggest which tests to run to validate the change
 
                     Solution: {slnPath}
+                    Configuration: {config}|{platform}
                     """;
 
                 return new JsonArray
@@ -238,11 +292,21 @@ public static class PromptRegistration
                     Name = "error_message",
                     Description = "NuGet error message or MSBuild output containing NuGet errors",
                     Required = true,
+                },
+                new PromptArgument
+                {
+                    Name = "sln_path",
+                    Description = "Path to .sln file (for find_packages tool)",
+                    Required = false,
                 }
             ],
             Handler = args =>
             {
                 var error = args["error_message"]?.GetValue<string>() ?? "";
+                var slnPath = args["sln_path"]?.GetValue<string>();
+                var findPkgHint = slnPath != null
+                    ? $"\n                    Use find_packages(sln_path=\"{slnPath}\") to see all version references."
+                    : "\n                    Use find_packages with the solution path to see all version references.";
 
                 var prompt = $"""
                     Diagnose this NuGet issue:
@@ -257,7 +321,7 @@ public static class PromptRegistration
 
                     2. "Version conflict" / "NU1605"
                        → Multiple projects reference different versions of the same package
-                       → Use find_packages tool to see all version references
+                       → {findPkgHint}
                        → Align versions in Directory.Packages.props
 
                     3. "packages.config and PackageReference" mixed
@@ -308,6 +372,12 @@ public static class PromptRegistration
                     Name = "platform",
                     Description = "Build platform (default: x64)",
                     Required = false,
+                },
+                new PromptArgument
+                {
+                    Name = "sln_path",
+                    Description = "Path to .sln file (for SolutionDir resolution). Auto-inferred if omitted.",
+                    Required = false,
                 }
             ],
             Handler = args =>
@@ -315,12 +385,14 @@ public static class PromptRegistration
                 var path = args["project_path"]?.GetValue<string>() ?? "";
                 var config = args["configuration"]?.GetValue<string>() ?? "Debug";
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
+                var slnPath = args["sln_path"]?.GetValue<string>();
+                var solutionDir = slnPath != null ? Path.GetDirectoryName(Path.GetFullPath(slnPath)) + Path.DirectorySeparatorChar : null;
 
                 ProjectSnapshot? snapshot = null;
                 string evalResult;
                 try
                 {
-                    snapshot = projEngine.Evaluate(path, config, platform);
+                    snapshot = projEngine.Evaluate(path, config, platform, solutionDir);
                     var propList = string.Join("\n", snapshot.Properties
                         .OrderBy(kv => kv.Key)
                         .Select(kv => $"  {kv.Key} = {kv.Value}"));

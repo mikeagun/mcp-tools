@@ -90,6 +90,8 @@ public static class Program
             try { return sessionManager.GetSession(sessionId).VmName; }
             catch { return null; }
         };
+        classifier.CommandSessionResolver = commandId =>
+            commandRunner.GetCommand(commandId)?.SessionId;
         var matcher = new HyperVRuleMatcher(classifier);
         var optionGenerator = new HyperVOptionGenerator(classifier);
         var policy = new PolicyEngine(hvConfig, classifier, matcher, resolvedPolicyPath);
@@ -125,6 +127,10 @@ public static class Program
 
                 return PolicyDispatch.Dispatch(method, parameters, server, policy, optionGenerator,
                     preValidator: (toolName, args) => PreValidateSession(toolName, args, classifier),
+                    argsSummaryBuilder: (toolName, args) => PolicyDispatch.BuildArgsSummary(args,
+                        ["vm_name", "command", "session_id", "command_id", "checkpoint_name",
+                         "name", "action", "source", "destination", "path",
+                         "script_path", "working_directory"]),
                     elicitationTimeoutSeconds: effectiveUserTimeout);
             });
         }

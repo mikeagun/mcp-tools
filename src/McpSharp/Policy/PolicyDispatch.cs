@@ -15,6 +15,11 @@ public static class PolicyDispatch
     /// <summary>
     /// Policy-aware dispatch. Wraps the server's normal dispatch with policy checks.
     /// </summary>
+    /// <param name="argsSummaryBuilder">
+    /// Optional custom builder for the args summary shown in elicitation prompts.
+    /// Receives (toolName, args) and returns a JsonObject of key-value pairs to display.
+    /// When null, uses BuildArgsSummary with the default interesting params list.
+    /// </param>
     public static JsonNode? Dispatch(
         string method,
         JsonNode? parameters,
@@ -23,6 +28,7 @@ public static class PolicyDispatch
         IOptionGenerator optionGenerator,
         Func<string, JsonObject, JsonNode?>? preValidator = null,
         Action<string, JsonObject>? argsEnricher = null,
+        Func<string, JsonObject, JsonObject>? argsSummaryBuilder = null,
         int elicitationTimeoutSeconds = 0)
     {
         if (method != "tools/call")
@@ -53,7 +59,7 @@ public static class PolicyDispatch
             PolicyDecision.Deny => DeniedResponse(toolName, evaluation, args),
             PolicyDecision.Confirm => HandleElicitation(
                 toolName, args, parameters!, evaluation, policy, server, optionGenerator,
-                elicitationTimeoutSeconds),
+                argsSummaryBuilder, elicitationTimeoutSeconds),
             _ => server.Dispatch(method, parameters),
         };
     }
@@ -68,10 +74,13 @@ public static class PolicyDispatch
         PolicyEngine policy,
         McpServer server,
         IOptionGenerator optionGenerator,
+        Func<string, JsonObject, JsonObject>? argsSummaryBuilder = null,
         int elicitationTimeoutSeconds = 0)
     {
         var options = optionGenerator.Generate(toolName, args, evaluation);
-        var argsSummary = BuildArgsSummary(args);
+        var argsSummary = argsSummaryBuilder != null
+            ? argsSummaryBuilder(toolName, args)
+            : BuildArgsSummary(args);
 
         var schema = BuildElicitationSchema(toolName, argsSummary, evaluation, options, out var message);
         var result = server.Elicit(message, schema, elicitationTimeoutSeconds);
@@ -331,7 +340,9 @@ public static class PolicyDispatch
     {
         interestingParams ??= ["sln_path", "project_path", "vm_name", "command",
             "session_id", "name", "action", "source", "destination", "path",
-            "targets", "configuration"];
+            "targets", "configuration",
+            "from_agent", "to_agent", "content", "message_type", "message_id",
+            "adjusted_content", "reason"];
         var summary = new JsonObject();
         foreach (var param in interestingParams)
         {

@@ -31,6 +31,13 @@ public sealed class HyperVToolClassifier : IToolClassifier
     /// </summary>
     public Func<string, string?>? SessionVmResolver { get; set; }
 
+    /// <summary>
+    /// Optional resolver that maps command IDs to session IDs.
+    /// Set during server startup to enable VM-scoped policy for command-based tools
+    /// like cancel_command and free_command_output.
+    /// </summary>
+    public Func<string, string?>? CommandSessionResolver { get; set; }
+
     public HyperVToolClassifier(HyperVPolicyConfig config)
     {
         _config = config;
@@ -249,6 +256,14 @@ public sealed class HyperVToolClassifier : IToolClassifier
             var computerName = args["computer_name"]?.GetValue<string>();
             if (computerName != null)
                 vmNames = [computerName];
+        }
+
+        // Resolve command_id to session_id for command-based tools.
+        if (sessionId == null && CommandSessionResolver != null)
+        {
+            var commandId = args["command_id"]?.GetValue<string>();
+            if (commandId != null)
+                sessionId = CommandSessionResolver(commandId);
         }
 
         // Resolve session_id to VM name if no vm_name was provided directly.

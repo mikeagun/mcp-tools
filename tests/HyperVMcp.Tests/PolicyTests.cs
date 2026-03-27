@@ -1247,6 +1247,49 @@ public class SuggestionGenerationTests
     }
 
     [Fact]
+    public void CancelCommand_WithResolver_GeneratesSessionAndPermanentPairs()
+    {
+        var (_, classifier, _, optionGen) = CreatePolicy();
+        classifier.CommandSessionResolver = commandId =>
+            commandId == "cmd-42" ? "s-1" : null;
+        classifier.SessionVmResolver = sessionId =>
+            sessionId == "s-1" ? "test-vm" : null;
+
+        var evaluation = classifier.Evaluate("cancel_command",
+            new JsonObject { ["command_id"] = "cmd-42" });
+
+        var options = optionGen.Generate("cancel_command",
+            new JsonObject { ["command_id"] = "cmd-42" },
+            evaluation);
+
+        Assert.Equal("Allow once", options[0].Label);
+        Assert.Contains(options, o => o.Label == "Allow cancel_command on test-vm (this session)");
+        Assert.Contains(options, o => o.Label == "Allow cancel_command on test-vm (permanently)");
+        Assert.Contains(options, o => o.Label == "Allow everything on test-vm (this session)");
+        // Destructive deny options.
+        Assert.Contains(options, o => o.Label == "Deny cancel_command on test-vm (this session)"
+            && o.Polarity == McpSharp.Policy.ApprovalPolarity.Deny);
+    }
+
+    [Fact]
+    public void CancelCommand_WithoutResolver_OnlyAllowAndDenyOnce()
+    {
+        var (_, _, _, optionGen) = CreatePolicy();
+
+        var options = optionGen.Generate("cancel_command",
+            new JsonObject { ["command_id"] = "cmd-42" },
+            PolicyEvaluationExtensions.BuildEvaluation(
+                McpSharp.Policy.PolicyDecision.Confirm, "test",
+                trigger: ConfirmTrigger.ToolRiskTier, riskTier: RiskTier.Destructive));
+
+        Assert.Equal("Allow once", options[0].Label);
+        Assert.Contains(options, o => o.Label == "Deny once");
+        // No session/permanent options without VM context.
+        Assert.DoesNotContain(options, o => o.Label.Contains("session"));
+        Assert.DoesNotContain(options, o => o.Label.Contains("permanently"));
+    }
+
+    [Fact]
     public void DenyRules_EvaluatedBeforeAllowRules()
     {
         var config = new HyperVPolicyConfig

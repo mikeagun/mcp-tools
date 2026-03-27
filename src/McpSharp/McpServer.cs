@@ -87,51 +87,36 @@ public sealed class McpServer
             },
         };
 
+        // Register a response waiter BEFORE sending the request to avoid races.
+        var tcs = new TaskCompletionSource<JsonNode>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Transport.RegisterResponseWaiter(id, tcs);
+
         Transport.WriteMessage(request);
-        Transport.StartReader(); // Ensure reader thread is running.
+        Transport.StartReader();
 
-        var deadline = timeoutSeconds > 0
-            ? DateTime.UtcNow.AddSeconds(timeoutSeconds)
-            : DateTime.MaxValue;
-
-        while (true)
+        // Wait for the reader thread to route the matching response to our TCS.
+        try
         {
-            var remainingMs = deadline == DateTime.MaxValue
-                ? Timeout.Infinite
-                : Math.Max(0, (int)(deadline - DateTime.UtcNow).TotalMilliseconds);
-
-            if (remainingMs == 0)
-                return CancelElicitation(id);
-
-            var msg = Transport.TakeMessage(remainingMs);
-            if (msg == null)
+            if (timeoutSeconds > 0)
             {
-                if (DateTime.UtcNow >= deadline)
+                if (!tcs.Task.Wait(TimeSpan.FromSeconds(timeoutSeconds)))
+                {
+                    Transport.UnregisterResponseWaiter(id);
                     return CancelElicitation(id);
-                return null; // Queue completed (connection closed).
+                }
             }
-
-            var obj = msg.AsObject();
-
-            // Response message (has "result" or "error", no "method").
-            if (!obj.ContainsKey("method") &&
-                (obj.ContainsKey("result") || obj.ContainsKey("error")))
+            else
             {
-                string? responseId;
-                try { responseId = msg["id"]?.GetValue<string>(); }
-                catch { continue; }
-
-                if (responseId == id)
-                    return ParseElicitationResult(msg);
-
-                // Not our response — discard (e.g., race with a late cancel).
-                continue;
+                tcs.Task.Wait();
             }
-
-            // Non-response message (parallel request or notification) — return it
-            // so the Run() loop can process it after this handler completes.
-            Transport.ReturnMessage(msg);
         }
+        catch (AggregateException ex) when (ex.InnerException is TaskCanceledException)
+        {
+            // Reader thread shut down (connection closed).
+            return null;
+        }
+
+        return ParseElicitationResult(tcs.Task.Result);
     }
 
     /// <summary>

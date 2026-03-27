@@ -52,6 +52,14 @@ public static class BuildTools
                         ["type"] = "string",
                         ["description"] = "Additional MSBuild arguments (e.g. '/p:Analysis=True')",
                     },
+                    ["retention"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["enum"] = new JsonArray("full", "tail"),
+                        ["description"] = "Output retention: 'full' (default, searchable, up to 50MB in memory " +
+                                          "with disk spill) or 'tail' (1K-line ring buffer, lightweight).",
+                        ["default"] = "full",
+                    },
                     ["timeout"] = new JsonObject
                     {
                         ["type"] = "integer",
@@ -89,13 +97,14 @@ public static class BuildTools
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
                 var restore = args["restore"]?.GetValue<bool>() ?? false;
                 var additionalArgs = args["additional_args"]?.GetValue<string>();
+                var retention = args["retention"]?.GetValue<string>() ?? "full";
                 var (timeout, timeoutClamped) = ClampTimeout(args["timeout"]?.GetValue<int>() ?? 30);
                 var errorsFrom = args["errors_from"]?.GetValue<int>() ?? 0;
                 var warningsFrom = args["warnings_from"]?.GetValue<int>() ?? 0;
                 var maxErrors = args["max_errors"]?.GetValue<int>() ?? 50;
 
                 var status = buildManager.StartOrPoll(slnPath, targets, config, platform,
-                    restore, additionalArgs, timeout);
+                    restore, additionalArgs, timeout, retention: retention);
                 var json = StatusToJson(status, errorsFrom, warningsFrom, maxErrors);
                 if (timeoutClamped)
                     json["timeout_clamped"] = $"Requested timeout exceeded max ({MaxTimeoutSeconds}s). " +
@@ -252,6 +261,237 @@ public static class BuildTools
                 };
             },
         });
+
+        RegisterOutputTools(server, buildManager);
+    }
+
+    private static void RegisterOutputTools(McpServer server, BuildManager buildManager)
+    {
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "search_build_output",
+            Description = "Regex search over a build's retained output. Returns matches with context " +
+                          "lines and pagination. Transparently searches disk when output exceeded memory.",
+            InputSchema = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["build_id"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Build ID to search. Omit for the current/most recent build.",
+                    },
+                    ["pattern"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Regex pattern.",
+                    },
+                    ["context_lines"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "Lines of context around each match (default: 3).",
+                        ["default"] = 3,
+                    },
+                    ["max_results"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "Max matches to return (default: 20).",
+                        ["default"] = 20,
+                    },
+                    ["skip"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "Skip first N matches for pagination (default: 0).",
+                        ["default"] = 0,
+                    },
+                },
+                ["required"] = new JsonArray("pattern"),
+            },
+            Handler = args =>
+            {
+                var buildId = args["build_id"]?.GetValue<string>();
+                var pattern = args["pattern"]!.GetValue<string>();
+                var contextLines = args["context_lines"]?.GetValue<int>() ?? 3;
+                var maxResults = args["max_results"]?.GetValue<int>() ?? 20;
+                var skip = args["skip"]?.GetValue<int>() ?? 0;
+
+                var output = buildManager.GetBuildOutput(buildId)
+                    ?? throw new InvalidOperationException(
+                        $"No build output found{(buildId != null ? $" for build '{buildId}'" : "")}. " +
+                        "Start a build first.");
+
+                var result = output.Search(pattern, contextLines, maxResults, skip);
+
+                var matchArr = new JsonArray();
+                foreach (var m in result.Matches)
+                {
+                    var ctxArr = new JsonArray();
+                    foreach (var c in m.Context) ctxArr.Add(c);
+                    matchArr.Add(new JsonObject
+                    {
+                        ["line"] = m.Line,
+                        ["text"] = m.Text,
+                        ["context"] = ctxArr,
+                    });
+                }
+
+                var obj = new JsonObject
+                {
+                    ["build_id"] = buildManager.GetCurrentBuildId(),
+                    ["total_matches"] = result.TotalMatches,
+                    ["showing"] = $"{skip + 1}-{skip + result.Matches.Count} of {result.TotalMatches}",
+                    ["matches"] = matchArr,
+                    ["total_output_lines"] = result.TotalLines,
+                    ["retained_lines"] = result.RetainedLines,
+                };
+                return obj;
+            },
+        });
+
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "get_build_output",
+            Description = "View a range of lines from a build's output. Supports tail, line range, " +
+                          "centering on a line number, or centering on a regex match.",
+            InputSchema = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["build_id"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Build ID. Omit for the current/most recent build.",
+                    },
+                    ["from_line"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "Start line (1-indexed). Omit for tail.",
+                    },
+                    ["to_line"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "End line (inclusive).",
+                    },
+                    ["max_lines"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "Max lines to return (default: 200).",
+                        ["default"] = 200,
+                        ["maximum"] = 500,
+                    },
+                    ["pattern"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Center output around first regex match.",
+                    },
+                    ["around_line"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "Center output around this line number.",
+                    },
+                },
+                ["required"] = new JsonArray(),
+            },
+            Handler = args =>
+            {
+                var buildId = args["build_id"]?.GetValue<string>();
+                var fromLine = args["from_line"]?.GetValue<int>();
+                var toLine = args["to_line"]?.GetValue<int>();
+                var maxLines = Math.Min(args["max_lines"]?.GetValue<int>() ?? 200, 500);
+                var pattern = args["pattern"]?.GetValue<string>();
+                var aroundLine = args["around_line"]?.GetValue<int>();
+
+                var output = buildManager.GetBuildOutput(buildId)
+                    ?? throw new InvalidOperationException(
+                        $"No build output found{(buildId != null ? $" for build '{buildId}'" : "")}. " +
+                        "Start a build first.");
+
+                OutputSlice slice;
+                int? matchLine = null;
+
+                // Priority: pattern > around_line > from_line > tail
+                if (!string.IsNullOrEmpty(pattern))
+                {
+                    matchLine = output.FindFirstMatch(pattern);
+                    slice = matchLine.HasValue
+                        ? output.GetAroundLine(matchLine.Value, maxLines)
+                        : output.GetTail(maxLines);
+                }
+                else if (aroundLine.HasValue)
+                {
+                    slice = output.GetAroundLine(aroundLine.Value, maxLines);
+                }
+                else if (fromLine.HasValue)
+                {
+                    var to = toLine ?? (fromLine.Value + maxLines - 1);
+                    slice = output.GetLines(fromLine.Value, to, maxLines);
+                }
+                else
+                {
+                    slice = output.GetTail(maxLines);
+                }
+
+                var linesText = string.Join("\n", slice.Lines.Select(
+                    (l, i) => $"{slice.FromLine + i}: {l}"));
+
+                var obj = new JsonObject
+                {
+                    ["build_id"] = buildManager.GetCurrentBuildId(),
+                    ["from_line"] = slice.FromLine,
+                    ["to_line"] = slice.ToLine,
+                    ["total_lines"] = slice.TotalLines,
+                    ["lines"] = linesText,
+                };
+                if (matchLine.HasValue) obj["match_line"] = matchLine.Value;
+                return obj;
+            },
+        });
+
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "save_build_output",
+            Description = "Write a build's output to a file on the host.",
+            InputSchema = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["build_id"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Build ID. Omit for the current/most recent build.",
+                    },
+                    ["path"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Local file path to write to.",
+                    },
+                },
+                ["required"] = new JsonArray("path"),
+            },
+            Handler = args =>
+            {
+                var buildId = args["build_id"]?.GetValue<string>();
+                var path = args["path"]!.GetValue<string>();
+
+                var output = buildManager.GetBuildOutput(buildId)
+                    ?? throw new InvalidOperationException(
+                        $"No build output found{(buildId != null ? $" for build '{buildId}'" : "")}. " +
+                        "Start a build first.");
+
+                var (linesWritten, bytesWritten) = output.SaveTo(path);
+
+                return new JsonObject
+                {
+                    ["build_id"] = buildManager.GetCurrentBuildId(),
+                    ["path"] = path,
+                    ["lines_written"] = linesWritten,
+                    ["size_mb"] = Math.Round(bytesWritten / (1024.0 * 1024.0), 1),
+                };
+            },
+        });
     }
 
     internal static JsonObject StatusToJson(BuildStatus s,
@@ -329,6 +569,7 @@ public static class BuildTools
         if (d.Line.HasValue) obj["line"] = d.Line.Value;
         if (d.Column.HasValue) obj["column"] = d.Column.Value;
         if (d.Project != null) obj["project"] = d.Project;
+        if (d.OutputLine.HasValue) obj["output_line"] = d.OutputLine.Value;
         return obj;
     }
 }
