@@ -26,15 +26,15 @@ dotnet build
 ## Testing
 
 ```bash
-dotnet test    # 504 tests across all projects
+dotnet test    # 540 tests across all projects
 ```
 
 | Project | Tests |
 |---------|-------|
 | McpSharp | 61 |
-| HyperVMcp | 164 |
-| MsBuildMcp | 144 |
+| HyperVMcp | 188 |
 | CiDebugMcp | 135 |
+| MsBuildMcp | 156 |
 
 ## Publishing
 
@@ -61,7 +61,11 @@ mcp-tools/
 │   ├── HyperVMcp.Tests/
 │   ├── CiDebugMcp.Tests/
 │   └── MsBuildMcp.Tests/
-├── prompts/                     # Prompt templates for MCP clients
+├── docs/                        # Guides (creating a new server, etc.)
+├── .github/
+│   ├── skills/                  # Copilot skill definitions
+│   ├── prompts/                 # VS Code prompt wrappers
+│   └── workflows/               # CI/CD pipelines
 └── publish/                     # Pre-built server binaries
 ```
 

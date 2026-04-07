@@ -334,13 +334,14 @@ src/MsBuildMcp/
 │   ├── DependencyGraph.cs  # Project reference DAG, topological sort (Kahn's algorithm)
 │   ├── BuildRunner.cs      # BuildJob (streaming parser) + BuildManager (lifecycle)
 │   ├── BuildTypes.cs       # BuildStatus, BuildCollision data types
+│   ├── OutputBuffer.cs     # Build output retention, search, range queries, and export
 │   └── ErrorParser.cs      # MSBuild output → structured BuildDiagnostic objects
 ├── Tools/
 │   ├── ToolRegistration.cs # Wires all tool groups into McpServer
 │   ├── SolutionTools.cs    # list_projects
 │   ├── ProjectTools.cs     # get_project_details, find_project_for_file, get_project_items, get_project_imports
 │   ├── DependencyTools.cs  # get_dependency_graph
-│   ├── BuildTools.cs       # build, get_build_status, cancel_build, parse_build_output
+│   ├── BuildTools.cs       # build, get_build_status, cancel_build, parse_build_output, search/get/save_build_output
 │   └── QueryTools.cs       # find_packages, find_property, diff_configurations
 ├── Prompts/
 │   └── PromptRegistration.cs  # 5 MCP prompt templates

@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server for managing Hyper-V virtual machines and
 
 ## What It Does
 
-Provides **26 structured tools** for VM lifecycle management, remote command execution, file transfers, and system diagnostics — all accessible to LLM agents via the MCP protocol over stdio. Key capabilities:
+Provides **25 structured tools** for VM lifecycle management, remote command execution, file transfers, and system diagnostics — all accessible to LLM agents via the MCP protocol over stdio. Key capabilities:
 
 - **VM lifecycle** — start, stop, restart, checkpoint, and restore VMs (with parallel bulk operations)
 - **Remote execution** — run PowerShell commands on VMs via PSDirect or WinRM sessions with streaming output

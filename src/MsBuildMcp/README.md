@@ -4,7 +4,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 
 ## What It Does
 
-Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw MSBuild output, this server provides **13 structured tools** that use the official `Microsoft.Build` evaluation APIs. Agents get:
+Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw MSBuild output, this server provides **16 structured tools** that use the official `Microsoft.Build` evaluation APIs. Agents get:
 
 - **Correct project evaluation** — handles property inheritance, conditional PropertyGroups, Directory.Build.props, import chains, and NuGet-generated targets
 - **Dependency graph analysis** — project reference DAG with topological build order
@@ -81,6 +81,9 @@ dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp
 | `get_build_status` | Poll a running build — blocks until completion or new errors |
 | `cancel_build` | Cancel the current build, return partial results |
 | `parse_build_output` | Parse raw MSBuild text into structured errors/warnings |
+| `search_build_output` | Regex search over a build's retained output with context lines |
+| `get_build_output` | View build output by line range, tail, or centered on a pattern match |
+| `save_build_output` | Write a build's output to a file on the host |
 
 ### Cross-Project Queries
 
@@ -117,7 +120,7 @@ Options adapt to context:
 - **Non-default configurations** add config-qualified options ("Allow Release builds of bpf2c on X")
 - **Full solution builds** only show solution-level options
 
-All query/analysis tools (11 of 13) are read-only and require no approval.
+All query/analysis tools (14 of 16) are read-only and require no approval.
 
 ### Build Constraints
 

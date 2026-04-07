@@ -8,10 +8,10 @@ This repository contains a shared **MCP (Model Context Protocol)** library and t
 
 | Project | Purpose | Tests |
 |---------|---------|-------|
-| **McpSharp** (`src/McpSharp/`) | Shared MCP protocol library — JSON-RPC 2.0, tool/resource/prompt registry | 63 |
-| **HyperVMcp** (`src/HyperVMcp/`) | Hyper-V VM management, remote execution, file transfers | 40 |
+| **McpSharp** (`src/McpSharp/`) | Shared MCP protocol library — JSON-RPC 2.0, tool/resource/prompt registry, elicitation, policy framework | 61 |
+| **HyperVMcp** (`src/HyperVMcp/`) | Hyper-V VM management, remote execution, file transfers, guardrails | 188 |
 | **CiDebugMcp** (`src/CiDebugMcp/`) | CI/CD failure investigation, log analysis, artifact downloads | 135 |
-| **MsBuildMcp** (`src/MsBuildMcp/`) | MSBuild solution/project evaluation, dependency graphs, builds | 92 |
+| **MsBuildMcp** (`src/MsBuildMcp/`) | MSBuild solution/project evaluation, dependency graphs, builds, guardrails | 156 |
 
 **Tech stack**: C# / .NET 9 / JSON-RPC 2.0 over stdio
 
