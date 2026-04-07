@@ -58,7 +58,7 @@ public static class CommandTools
                     ["timeout"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = "Hard timeout in seconds. Backend kills the command after this time.",
+                        ["description"] = "Hard timeout in seconds. Backend **kills** the command after this time. Omit to let the command run indefinitely.",
                     },
                     ["retention"] = new JsonObject
                     {
@@ -92,7 +92,8 @@ public static class CommandTools
             Name = "get_command_status",
             Description = "Poll a running or recently completed command. " +
                 "Set timeout > 0 to wait for new output or completion. " +
-                "Use since_line to get only new output since last poll (returns last tail_lines of new output).",
+                "Use since_line to get only new output since last poll (returns last tail_lines of new output). " +
+                "Set include_output=false for cheap status-only polls.",
             InputSchema = new JsonObject
             {
                 ["type"] = "object",
@@ -183,7 +184,7 @@ public static class CommandTools
                     ["script_path"] = new JsonObject { ["type"] = "string", ["description"] = "Script path on the VM." },
                     ["args"] = new JsonObject { ["type"] = "string", ["description"] = "Script arguments." },
                     ["initial_wait"] = new JsonObject { ["type"] = "integer", ["description"] = $"Max seconds to wait for initial output (default: 30, max {TimeoutHelper.MaxTimeoutSeconds}). Script continues running — use get_command_status to poll.", ["maximum"] = TimeoutHelper.MaxTimeoutSeconds },
-                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Hard timeout in seconds. Backend kills the command after this time." },
+                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Hard timeout in seconds. Backend **kills** the command after this time. Omit to let the command run indefinitely." },
                     ["working_directory"] = new JsonObject { ["type"] = "string", ["description"] = "Working directory on the VM." },
                     ["output_format"] = new JsonObject
                     {
@@ -228,7 +229,8 @@ public static class CommandTools
         {
             ["command_id"] = snapshot.CommandId,
             ["session_id"] = snapshot.SessionId,
-            ["status"] = snapshot.Status.ToString().ToLowerInvariant(),
+            ["status"] = snapshot.Status == CommandStatus.TimedOut
+                ? "timed_out" : snapshot.Status.ToString().ToLowerInvariant(),
         };
 
         if (snapshot.ExitCode.HasValue)
@@ -267,6 +269,9 @@ public static class CommandTools
 
         if (snapshot.Status == CommandStatus.Running)
             json["hint"] = $"Command running — session locked. Poll with get_command_status(command_id='{snapshot.CommandId}'), cancel with cancel_command(command_id='{snapshot.CommandId}').";
+
+        if (snapshot.Status == CommandStatus.TimedOut)
+            json["hint"] = "Command was killed by hard timeout. The output is incomplete. Re-run with a larger timeout or omit timeout to let it run indefinitely.";
 
         // Detect raw .NET object output (e.g. "Microsoft.PowerShell.Commands.GenericMeasureInfo")
         // and suggest output_format='text' for human-readable rendering.
