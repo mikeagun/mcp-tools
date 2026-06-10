@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -19,12 +20,13 @@ public class EndToEndTests : IDisposable
     public EndToEndTests()
     {
         var projectDir = FindProjectDir();
+        var configuration = DetectConfiguration();
         _server = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = "dotnet",
-                Arguments = $"run --project \"{projectDir}\" --no-build",
+                Arguments = $"run --project \"{projectDir}\" -c \"{configuration}\" --no-build",
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -195,6 +197,33 @@ C:\src\b.cpp(20): warning C4996: deprecated [C:\proj.vcxproj]",
             dir = Path.GetDirectoryName(dir);
         }
         throw new InvalidOperationException("Cannot find MsBuildMcp project directory");
+    }
+
+    // Detect the configuration the test assembly was built with so the spawned
+    // server child process uses matching binaries. CI builds only the configured
+    // matrix leg (e.g. Release), so an unqualified `dotnet run --no-build`
+    // defaults to Debug and would fail to find binaries in the Release leg.
+    private static string DetectConfiguration()
+    {
+        // Primary: SDK auto-generates AssemblyConfigurationAttribute from
+        // $(Configuration) at build time. This is the authoritative source.
+        var attr = typeof(EndToEndTests).Assembly
+            .GetCustomAttribute<AssemblyConfigurationAttribute>();
+        if (!string.IsNullOrWhiteSpace(attr?.Configuration))
+            return attr.Configuration;
+
+        // Fallback: parse AppContext.BaseDirectory looking for bin/<Config>/...
+        // (case-insensitive `bin` match for non-standard output paths).
+        var parts = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                                            .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
+        for (int i = parts.Length - 1; i >= 0; i--)
+        {
+            if (string.Equals(parts[i], "bin", StringComparison.OrdinalIgnoreCase) && i + 1 < parts.Length)
+                return parts[i + 1];
+        }
+
+        throw new InvalidOperationException(
+            $"Cannot determine build configuration from AssemblyConfigurationAttribute or AppContext.BaseDirectory '{AppContext.BaseDirectory}'.");
     }
 
     private static string? FindSolutionPath()
