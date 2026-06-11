@@ -115,7 +115,7 @@ public class FeatureTests : IDisposable
             "find_project_for_file", "find_property", "get_build_output",
             "get_build_status", "get_dependency_graph", "get_project_details",
             "get_project_imports", "get_project_items", "list_projects",
-            "parse_build_output", "save_build_output", "search_build_output",
+            "parse_build_output", "publish", "save_build_output", "search_build_output",
         }, names);
     }
 

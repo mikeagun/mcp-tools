@@ -22,6 +22,8 @@ public sealed class MsBuildOptionGenerator : IOptionGenerator
 
         if (toolName == "build")
             GenerateBuildOptions(options, args);
+        else if (toolName == "publish")
+            GeneratePublishOptions(options, args);
         else if (toolName == "cancel_build")
             GenerateCancelBuildOptions(options, args);
 
@@ -105,6 +107,51 @@ public sealed class MsBuildOptionGenerator : IOptionGenerator
         });
 
         // Always ends with "Deny" (terminal — no Prompt 2).
+        options.Add(new()
+        {
+            Label = "Deny",
+            Persistence = ApprovalPersistence.Once,
+            Polarity = ApprovalPolarity.Deny,
+        });
+    }
+
+    private static void GeneratePublishOptions(List<ElicitationOption> options, JsonObject args)
+    {
+        var projectPath = args["project_path"]?.GetValue<string>();
+        var projectName = projectPath != null ? Path.GetFileName(projectPath) : null;
+
+        options.Add(new()
+        {
+            Label = "Allow once",
+            Persistence = ApprovalPersistence.Once,
+            Polarity = ApprovalPolarity.Allow,
+        });
+
+        if (projectName != null)
+        {
+            options.Add(new()
+            {
+                Label = $"Allow publish of {projectName}",
+                Polarity = ApprovalPolarity.Allow,
+                Rule = new ApprovalRule
+                {
+                    Tools = ["publish"],
+                    Constraints = new Dictionary<string, System.Text.Json.JsonElement>
+                    {
+                        ["project_path"] = System.Text.Json.JsonSerializer.SerializeToElement(
+                            MsBuildRuleMatcher.NormalizePath(projectPath!)),
+                    },
+                },
+            });
+        }
+
+        options.Add(new()
+        {
+            Label = "Allow all publish",
+            Polarity = ApprovalPolarity.Allow,
+            Rule = new ApprovalRule { Tools = ["publish"] },
+        });
+
         options.Add(new()
         {
             Label = "Deny",

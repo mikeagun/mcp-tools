@@ -4,7 +4,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 
 ## What It Does
 
-Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw MSBuild output, this server provides **16 structured tools** that use the official `Microsoft.Build` evaluation APIs. Agents get:
+Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw MSBuild output, this server provides **17 structured tools** that use the official `Microsoft.Build` evaluation APIs. Agents get:
 
 - **Correct project evaluation** — handles property inheritance, conditional PropertyGroups, Directory.Build.props, import chains, and NuGet-generated targets
 - **Dependency graph analysis** — project reference DAG with topological build order
@@ -73,13 +73,14 @@ dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp
 |------|-------------|
 | `get_dependency_graph` | Project reference DAG with topological build order (JSON or Mermaid) |
 
-### Build Execution
+### Build & Publish
 
 | Tool | Description |
 |------|-------------|
 | `build` | Start MSBuild, wait up to `timeout` seconds, return structured progress/errors |
-| `get_build_status` | Poll a running build — blocks until completion or new errors |
-| `cancel_build` | Cancel the current build, return partial results |
+| `publish` | Run `dotnet publish` for .NET SDK projects — produces deployment-ready output |
+| `get_build_status` | Poll a running build/publish — blocks until completion or new errors |
+| `cancel_build` | Cancel the current build/publish, return partial results |
 | `parse_build_output` | Parse raw MSBuild text into structured errors/warnings |
 | `search_build_output` | Regex search over a build's retained output with context lines |
 | `get_build_output` | View build output by line range, tail, or centered on a pattern match |
@@ -95,7 +96,7 @@ dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp
 
 ## Guardrails
 
-The `build` and `cancel_build` tools require user approval before execution. The server uses [MCP elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation) to prompt the user directly through the client UI — the agent never sees the approval flow.
+The `build`, `publish`, and `cancel_build` tools require user approval before execution. The server uses [MCP elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation) to prompt the user directly through the client UI — the agent never sees the approval flow.
 
 ### Two-Prompt Approval
 
@@ -289,11 +290,11 @@ src/MsBuildMcp/
 │   ├── SolutionEngine.cs   # .sln parser
 │   ├── ProjectEngine.cs    # Microsoft.Build evaluation with caching
 │   ├── DependencyGraph.cs  # DAG with topological sort
-│   ├── BuildRunner.cs      # Async MSBuild process management
+│   ├── BuildRunner.cs      # Async MSBuild/dotnet process management
 │   └── ErrorParser.cs      # MSBuild output → structured diagnostics
 ├── Policy/
 │   ├── MsBuildPolicyConfig.cs    # Build constraints (require_targets, etc.)
-│   ├── MsBuildToolClassifier.cs  # build/cancel_build require confirmation
+│   ├── MsBuildToolClassifier.cs  # build/publish/cancel_build require confirmation
 │   ├── MsBuildOptionGenerator.cs # Two-prompt scope + persistence options
 │   └── MsBuildRuleMatcher.cs     # Solution/target/config constraint matching
 ├── Tools/                  # MCP tool registrations

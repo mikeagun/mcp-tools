@@ -36,12 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Agent-first API with progressive disclosure and failure classification
   - 135 tests
 
-- **MsBuildMcp** — MSBuild project exploration server (16 tools, 5 prompts):
+- **MsBuildMcp** — MSBuild project exploration server (17 tools, 5 prompts):
   - Project exploration: `list_projects`, `get_project_details`, `get_project_items`, `get_project_imports`, `find_project_for_file`
   - Dependency analysis: `get_dependency_graph`
-  - Build execution: `build`, `get_build_status`, `cancel_build`, `parse_build_output`, `search_build_output`, `get_build_output`, `save_build_output`
+  - Build execution: `build`, `publish`, `get_build_status`, `cancel_build`, `parse_build_output`, `search_build_output`, `get_build_output`, `save_build_output`
   - Cross-project queries: `find_property`, `find_packages`, `diff_configurations`
   - Prompts: `diagnose-build-failure`, `what-to-build`, `impact-analysis`, `resolve-nuget-issue`, `explain-build-config`
   - Dual MSBuild strategy (dotnet SDK evaluation + VS MSBuild builds)
+  - `publish` uses `dotnet` CLI directly (not VS MSBuild) for .NET SDK projects
   - Policy-based guardrails with MCP elicitation
-  - 156 tests
+  - 167 tests
