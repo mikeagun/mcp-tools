@@ -213,20 +213,62 @@ public sealed class McpServer
         if (!_tools.TryGetValue(toolName, out var tool))
             throw new InvalidOperationException($"Unknown tool: {toolName}");
 
-        try
+        const int maxAuthRetries = 2;
+
+        for (int attempt = 0; attempt <= maxAuthRetries; attempt++)
         {
-            var result = tool.Handler(arguments);
-            var text = result?.ToJsonString() ?? "null";
-            return new JsonObject
+            try
             {
-                ["content"] = new JsonArray
+                var result = tool.Handler(arguments);
+                var text = result?.ToJsonString() ?? "null";
+                return new JsonObject
                 {
-                    new JsonObject { ["type"] = "text", ["text"] = text }
-                }
-            };
-        }
-        catch (AuthenticationException authEx)
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject { ["type"] = "text", ["text"] = text }
+                    }
+                };
+            }
+            catch (AuthenticationException authEx)
             {
+                // Try elicitation if client supports it and we haven't exhausted retries
+                if (attempt < maxAuthRetries && ClientSupportsElicitation)
+                {
+                    var elicitResult = Elicit(
+                        $"Authentication failed ({authEx.Provider}): {authEx.Message}\n\n" +
+                        $"{authEx.Remediation}\n\n" +
+                        "After re-authenticating, choose Retry to continue.",
+                        new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["properties"] = new JsonObject
+                            {
+                                ["action"] = new JsonObject
+                                {
+                                    ["type"] = "string",
+                                    ["description"] = "Choose 'retry' after re-authenticating, or 'abort' to stop",
+                                    ["enum"] = new JsonArray("retry", "abort"),
+                                },
+                            },
+                        },
+                        timeoutSeconds: 120);
+
+                    if (elicitResult?.Action == ElicitationAction.Accept)
+                    {
+                        var action = elicitResult.Content?["action"]?.GetValue<string>();
+                        if (action == "retry")
+                        {
+                            authEx.ResetAuth?.Invoke();
+                            // Re-parse arguments since JsonObject can only have one parent
+                            arguments = parameters?["arguments"]?.AsObject() != null
+                                ? JsonNode.Parse(parameters!["arguments"]!.ToJsonString())!.AsObject()
+                                : new JsonObject();
+                            continue; // retry the tool handler
+                        }
+                    }
+                    // User declined, cancelled, timed out, or chose abort — fall through to STOP
+                }
+
                 return new JsonObject
                 {
                     ["content"] = new JsonArray
@@ -244,16 +286,27 @@ public sealed class McpServer
                 };
             }
             catch (Exception ex)
-        {
-            return new JsonObject
             {
-                ["content"] = new JsonArray
+                return new JsonObject
                 {
-                    new JsonObject { ["type"] = "text", ["text"] = $"Error: {ex.Message}" }
-                },
-                ["isError"] = true
-            };
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject { ["type"] = "text", ["text"] = $"Error: {ex.Message}" }
+                    },
+                    ["isError"] = true
+                };
+            }
         }
+
+        // Should not reach here, but safety net
+        return new JsonObject
+        {
+            ["content"] = new JsonArray
+            {
+                new JsonObject { ["type"] = "text", ["text"] = "Error: authentication retry limit exceeded" }
+            },
+            ["isError"] = true
+        };
     }
 
     private JsonNode HandleResourcesList()

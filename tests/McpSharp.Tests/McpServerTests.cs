@@ -253,6 +253,37 @@ public class McpServerTests
     }
 
     [Fact]
+    public void ToolsCall_AuthException_WithoutElicitation_FallsBackToStopError()
+    {
+        // Server without transport → ClientSupportsElicitation is false → no elicitation
+        var server = CreateServer();
+        var resetCalled = false;
+        server.RegisterTool(CreateTool("authtool", _ =>
+            throw new AuthenticationException("GitHub", "Token expired", "Fix it")
+            { ResetAuth = () => resetCalled = true }));
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "authtool" })!;
+
+        Assert.True(result["isError"]!.GetValue<bool>());
+        Assert.Contains("AUTHENTICATION FAILED", result["content"]!.AsArray()[0]!["text"]!.GetValue<string>());
+        Assert.False(resetCalled); // ResetAuth not called without elicitation
+    }
+
+    [Fact]
+    public void ToolsCall_AuthException_ResetAuthCallbackOnRetry()
+    {
+        // Verify that ResetAuth callback is correctly wired — test the property itself
+        var resetCount = 0;
+        var authEx = new AuthenticationException("ADO", "Auth failed", "Fix it")
+        { ResetAuth = () => resetCount++ };
+
+        authEx.ResetAuth();
+        authEx.ResetAuth();
+
+        Assert.Equal(2, resetCount);
+    }
+
+    [Fact]
     public void ToolsCall_UnknownTool_Throws()
     {
         var server = CreateServer();

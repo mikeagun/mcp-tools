@@ -724,6 +724,17 @@ public sealed class AdoCiProvider : ICiProvider
         }
     }
 
+    /// <summary>
+    /// Reset cached auth state so the next API call re-resolves credentials.
+    /// Used after the user re-authenticates via elicitation prompt.
+    /// </summary>
+    internal void ResetAuth()
+    {
+        _authResolved = false;
+        _http.DefaultRequestHeaders.Authorization = null;
+        Console.Error.WriteLine("ci-debug-mcp: ADO auth reset — will re-resolve on next call");
+    }
+
     private AuthResult? ResolveAdoAuth()
     {
         // 1. Explicit PAT
@@ -845,7 +856,8 @@ public sealed class AdoCiProvider : ICiProvider
                     $"ADO API returned {(int)response.StatusCode} — credentials are invalid or expired.",
                     "1. Run: az login\n" +
                     "2. Or set the AZURE_DEVOPS_PAT environment variable with a valid Personal Access Token\n" +
-                    "3. Then restart the CLI session");
+                    "3. Then restart the CLI session")
+                { ResetAuth = ResetAuth };
             GuardHtmlResponse(body);
             response.EnsureSuccessStatusCode();
         }
@@ -857,7 +869,7 @@ public sealed class AdoCiProvider : ICiProvider
     /// <summary>
     /// Detect HTML login pages returned by ADO when auth fails (200 status but HTML body).
     /// </summary>
-    private static void GuardHtmlResponse(string content)
+    private void GuardHtmlResponse(string content)
     {
         if (content.Length > 0 && (content[0] == '<' ||
             content.TrimStart().StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
@@ -868,7 +880,8 @@ public sealed class AdoCiProvider : ICiProvider
                 "ADO returned HTML instead of JSON — authentication failed.",
                 "1. Run: az login\n" +
                 "2. Or set the AZURE_DEVOPS_PAT environment variable with a valid Personal Access Token\n" +
-                "3. Then restart the CLI session");
+                "3. Then restart the CLI session")
+            { ResetAuth = ResetAuth };
         }
     }
 

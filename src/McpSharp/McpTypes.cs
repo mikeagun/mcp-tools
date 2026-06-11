@@ -77,7 +77,8 @@ public enum ElicitationAction
 
 /// <summary>
 /// Thrown when authentication fails and requires human intervention.
-/// Caught by McpServer to produce a structured error that tells the agent to STOP.
+/// Caught by McpServer to produce a structured error that tells the agent to STOP,
+/// or to prompt the user via elicitation if supported.
 /// </summary>
 public class AuthenticationException : Exception
 {
@@ -86,6 +87,12 @@ public class AuthenticationException : Exception
 
     /// <summary>Human-readable remediation steps.</summary>
     public string Remediation { get; }
+
+    /// <summary>
+    /// Optional callback to reset cached auth state before a retry attempt.
+    /// Called by McpServer when the user chooses to retry after re-authenticating.
+    /// </summary>
+    public Action? ResetAuth { get; init; }
 
     public AuthenticationException(string provider, string message, string remediation)
         : base(message)

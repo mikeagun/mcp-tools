@@ -17,7 +17,8 @@ public sealed class GitHubClient : IGitHubApi
 {
     private readonly HttpClient _http;
     private readonly LogCache _cache;
-    private bool _authResolved;
+    private readonly object _authLock = new();
+    private volatile bool _authResolved;
 
     public GitHubClient(LogCache cache, int timeoutSeconds = 50)
     {
@@ -53,24 +54,57 @@ public sealed class GitHubClient : IGitHubApi
     }
 
     /// <summary>
+    /// Start auth resolution in the background so the first API call doesn't pay the cost.
+    /// Non-blocking — returns immediately, auth resolves on a thread pool thread.
+    /// </summary>
+    public void WarmAuth() => Task.Run(EnsureAuth);
+
+    /// <summary>
     /// Resolve auth lazily on first API call (avoids GCM popup at server startup).
+    /// Thread-safe: a concurrent caller (e.g., the WarmAuth background task and a
+    /// synchronous tool handler) must not observe _authResolved == true while the
+    /// Authorization header is still unset, otherwise the unset header propagates
+    /// into _http.GetAsync calls and CreateAuthenticatedClient snapshots.
     /// </summary>
     private void EnsureAuth()
     {
         if (_authResolved) return;
-        _authResolved = true;
 
-        var (token, source) = ResolveToken();
-        if (token != null)
+        // Double-check inside the lock for the common fast path.
+        lock (_authLock)
         {
-            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("token", token);
-            Console.Error.WriteLine($"ci-debug-mcp: authenticated via {source}");
+            if (_authResolved) return;
+
+            var (token, source) = ResolveToken();
+            if (token != null)
+            {
+                _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("token", token);
+                Console.Error.WriteLine($"ci-debug-mcp: authenticated via {source}");
+            }
+            else
+            {
+                Console.Error.WriteLine("ci-debug-mcp: no authentication found — log downloads will fail (403). " +
+                                        "Set GITHUB_TOKEN, or ensure Git Credential Manager or gh CLI is configured.");
+            }
+
+            // Flip _authResolved last so that callers observing _authResolved == true
+            // see a fully-configured HttpClient.
+            _authResolved = true;
         }
-        else
+    }
+
+    /// <summary>
+    /// Reset cached auth state so the next API call re-resolves credentials.
+    /// Used after the user re-authenticates via elicitation prompt.
+    /// </summary>
+    internal void ResetAuth()
+    {
+        lock (_authLock)
         {
-            Console.Error.WriteLine("ci-debug-mcp: no authentication found — log downloads will fail (403). " +
-                                    "Set GITHUB_TOKEN, or ensure Git Credential Manager or gh CLI is configured.");
+            _authResolved = false;
+            _http.DefaultRequestHeaders.Authorization = null;
         }
+        Console.Error.WriteLine("ci-debug-mcp: GitHub auth reset — will re-resolve on next call");
     }
 
     /// <summary>
@@ -385,7 +419,8 @@ public sealed class GitHubClient : IGitHubApi
                 $"GitHub API returned {(int)response.StatusCode} — credentials are invalid, expired, or missing.",
                 "1. Run: gh auth login\n" +
                 "2. Or set the GITHUB_TOKEN environment variable\n" +
-                "3. Then restart the CLI session");
+                "3. Then restart the CLI session")
+            { ResetAuth = ResetAuth };
         }
         response.EnsureSuccessStatusCode();
         var content = await response.Content.ReadAsStringAsync();
