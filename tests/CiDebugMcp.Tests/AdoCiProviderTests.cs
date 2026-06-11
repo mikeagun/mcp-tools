@@ -286,6 +286,19 @@ public class AdoCiProviderTests
         Assert.Null(json["cancelled"]);
     }
 
+    // ── AuthenticationException ─────────────────────────────────
+
+    [Fact]
+    public void AuthenticationException_HasProviderAndRemediation()
+    {
+        var ex = new McpSharp.AuthenticationException(
+            "ADO", "Auth failed", "Run: az login");
+
+        Assert.Equal("ADO", ex.Provider);
+        Assert.Equal("Auth failed", ex.Message);
+        Assert.Equal("Run: az login", ex.Remediation);
+    }
+
     // ── CiArtifact.DownloadUrl ──────────────────────────────────
 
     [Fact]

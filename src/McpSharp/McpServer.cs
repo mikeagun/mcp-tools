@@ -225,7 +225,25 @@ public sealed class McpServer
                 }
             };
         }
-        catch (Exception ex)
+        catch (AuthenticationException authEx)
+            {
+                return new JsonObject
+                {
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "text",
+                            ["text"] = $"AUTHENTICATION FAILED ({authEx.Provider}): {authEx.Message}\n\n" +
+                                       $"STOP — do not retry or work around this error. " +
+                                       $"This requires human action:\n{authEx.Remediation}\n\n" +
+                                       $"Present this message to the user and wait for them to resolve it.",
+                        }
+                    },
+                    ["isError"] = true
+                };
+            }
+            catch (Exception ex)
         {
             return new JsonObject
             {

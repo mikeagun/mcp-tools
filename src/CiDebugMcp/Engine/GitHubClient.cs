@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text.Json.Nodes;
+using McpSharp;
 
 namespace CiDebugMcp.Engine;
 
@@ -376,6 +377,16 @@ public sealed class GitHubClient : IGitHubApi
     {
         EnsureAuth();
         var response = await _http.GetAsync(path);
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+            response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new AuthenticationException(
+                "GitHub",
+                $"GitHub API returned {(int)response.StatusCode} — credentials are invalid, expired, or missing.",
+                "1. Run: gh auth login\n" +
+                "2. Or set the GITHUB_TOKEN environment variable\n" +
+                "3. Then restart the CLI session");
+        }
         response.EnsureSuccessStatusCode();
         var content = await response.Content.ReadAsStringAsync();
         return JsonNode.Parse(content);

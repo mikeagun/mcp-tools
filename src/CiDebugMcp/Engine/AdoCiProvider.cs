@@ -839,6 +839,13 @@ public sealed class AdoCiProvider : ICiProvider
             if ((int)response.StatusCode == 404)
                 throw new HttpRequestException(
                     $"ADO API returned 404 for {path}. Verify the build/resource exists and you have access.");
+            if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
+                throw new McpSharp.AuthenticationException(
+                    "ADO",
+                    $"ADO API returned {(int)response.StatusCode} — credentials are invalid or expired.",
+                    "1. Run: az login\n" +
+                    "2. Or set the AZURE_DEVOPS_PAT environment variable with a valid Personal Access Token\n" +
+                    "3. Then restart the CLI session");
             GuardHtmlResponse(body);
             response.EnsureSuccessStatusCode();
         }
@@ -856,9 +863,12 @@ public sealed class AdoCiProvider : ICiProvider
             content.TrimStart().StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
             content.TrimStart().StartsWith("<html", StringComparison.OrdinalIgnoreCase)))
         {
-            throw new InvalidOperationException(
-                "ADO returned HTML instead of JSON — authentication failed. " +
-                "Ensure Azure CLI is logged in (az login) or set AZURE_DEVOPS_PAT.");
+            throw new McpSharp.AuthenticationException(
+                "ADO",
+                "ADO returned HTML instead of JSON — authentication failed.",
+                "1. Run: az login\n" +
+                "2. Or set the AZURE_DEVOPS_PAT environment variable with a valid Personal Access Token\n" +
+                "3. Then restart the CLI session");
         }
     }
 

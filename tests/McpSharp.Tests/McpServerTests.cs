@@ -218,6 +218,41 @@ public class McpServerTests
     }
 
     [Fact]
+    public void ToolsCall_AuthenticationException_ReturnsStructuredAuthError()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("authtool", _ =>
+            throw new AuthenticationException("GitHub", "Token expired", "Run: gh auth login")));
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "authtool" })!;
+
+        Assert.True(result["isError"]!.GetValue<bool>());
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Contains("AUTHENTICATION FAILED", text);
+        Assert.Contains("GitHub", text);
+        Assert.Contains("Token expired", text);
+        Assert.Contains("STOP", text);
+        Assert.Contains("gh auth login", text);
+    }
+
+    [Fact]
+    public void ToolsCall_AuthenticationException_IncludesRemediation()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("adoauth", _ =>
+            throw new AuthenticationException("ADO", "Auth failed",
+                "1. Run: az login\n2. Set AZURE_DEVOPS_PAT")));
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "adoauth" })!;
+
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Contains("ADO", text);
+        Assert.Contains("az login", text);
+        Assert.Contains("AZURE_DEVOPS_PAT", text);
+        Assert.Contains("do not retry", text);
+    }
+
+    [Fact]
     public void ToolsCall_UnknownTool_Throws()
     {
         var server = CreateServer();
