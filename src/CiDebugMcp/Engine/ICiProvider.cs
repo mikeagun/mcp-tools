@@ -135,6 +135,7 @@ public sealed class CiArtifact
     public required string Name { get; init; }
     public long SizeBytes { get; init; }
     public bool Expired { get; init; }
+    public string? DownloadUrl { get; init; }
 }
 
 /// <summary>

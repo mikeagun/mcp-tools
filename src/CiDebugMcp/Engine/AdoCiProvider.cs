@@ -318,11 +318,20 @@ public sealed class AdoCiProvider : ICiProvider
         var json = await GetJsonAsync($"build/builds/{buildId}/artifacts?api-version=7.1");
         var artifacts = json?["value"]?.AsArray() ?? [];
 
-        return artifacts.Select(a => new CiArtifact
+        return artifacts.Select(a =>
         {
-            Id = a?["id"]?.GetValue<int>().ToString() ?? "0",
-            Name = a?["name"]?.GetValue<string>() ?? "",
-            SizeBytes = 0, // ADO doesn't include size in list response
+            long size = 0;
+            var sizeStr = a?["resource"]?["properties"]?["artifactsize"]?.GetValue<string>();
+            if (sizeStr != null)
+                long.TryParse(sizeStr, out size);
+
+            return new CiArtifact
+            {
+                Id = a?["id"]?.GetValue<int>().ToString() ?? "0",
+                Name = a?["name"]?.GetValue<string>() ?? "",
+                SizeBytes = size,
+                DownloadUrl = a?["resource"]?["downloadUrl"]?.GetValue<string>(),
+            };
         }).ToArray();
     }
 
