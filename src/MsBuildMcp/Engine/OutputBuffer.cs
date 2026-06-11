@@ -341,8 +341,11 @@ public sealed class OutputBuffer : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
         _diskWriter?.Dispose();
         // Clean up temp file
         if (_diskPath != null)
