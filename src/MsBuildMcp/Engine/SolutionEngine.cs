@@ -171,9 +171,12 @@ public sealed class SolutionEngine
         Dictionary<string, SolutionProject> guidToProject)
     {
         var parts = new List<string>();
+        var visited = new HashSet<string>();
         var current = guid;
         while (nesting.TryGetValue(current, out var parentGuid))
         {
+            if (!visited.Add(parentGuid))
+                break; // Circular nesting detected — stop traversal
             if (guidToProject.TryGetValue(parentGuid, out var parent))
                 parts.Insert(0, parent.Name);
             current = parentGuid;
