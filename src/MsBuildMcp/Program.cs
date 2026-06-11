@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 using MsBuildMcp.Engine;
 using MsBuildMcp.Policy;
 using MsBuildMcp.Prompts;

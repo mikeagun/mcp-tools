@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using CiDebugMcp.Engine;

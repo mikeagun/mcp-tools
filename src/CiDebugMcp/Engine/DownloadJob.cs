@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 using System.IO.Compression;
 
 namespace CiDebugMcp.Engine;

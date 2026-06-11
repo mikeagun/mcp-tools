@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 using System.Collections.Concurrent;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Locator;

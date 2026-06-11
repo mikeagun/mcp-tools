@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 namespace MsBuildMcp.Engine;
 
 public sealed class ProjectSnapshot
