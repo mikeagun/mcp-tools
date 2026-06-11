@@ -73,8 +73,9 @@ public sealed class ProjectEngine : IDisposable
             proc.WaitForExit();
             return string.IsNullOrEmpty(path) ? null : path;
         }
-        catch
+        catch (Exception ex)
         {
+            Console.Error.WriteLine($"msbuild-mcp: vswhere failed: {ex.Message}");
             return null;
         }
     }
