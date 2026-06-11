@@ -19,7 +19,23 @@ public sealed class AdoCiProvider : ICiProvider
     private readonly string _orgUrl;
     private readonly string _project;
     private readonly string? _originalHost;
-    private bool _authResolved;
+    private readonly object _authLock = new();
+    private volatile bool _authResolved;
+
+    /// <summary>
+    /// Default per-request HTTP timeout for the ADO REST API client.
+    /// Matches GitHubClient's posture — short enough to surface a managed
+    /// timeout before the MCP client gives up, long enough for large
+    /// timeline/log responses.
+    /// </summary>
+    private static readonly TimeSpan HttpRequestTimeout = TimeSpan.FromSeconds(50);
+
+    /// <summary>
+    /// Maximum number of ADO log downloads to run concurrently when assembling
+    /// a failure report with detail=errors. Bounded to avoid hammering the
+    /// ADO API but high enough to remove the sequential-download wall-clock.
+    /// </summary>
+    private const int LogFetchConcurrency = 4;
 
     public string ProviderName => "ado";
 
@@ -33,10 +49,22 @@ public sealed class AdoCiProvider : ICiProvider
         _cache = cache;
         _originalHost = originalHost;
 
-        _http = new HttpClient { BaseAddress = new Uri($"{_orgUrl}/{_project}/_apis/") };
+        _http = new HttpClient
+        {
+            BaseAddress = new Uri($"{_orgUrl}/{_project}/_apis/"),
+            Timeout = HttpRequestTimeout,
+        };
         _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ci-debug-mcp", "0.1"));
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
+
+    /// <summary>
+    /// Start auth resolution in the background so the first API call doesn't pay
+    /// the cost of az CLI / GCM subprocess invocation. Non-blocking — returns
+    /// immediately, auth resolves on a thread pool thread. Safe to call multiple
+    /// times; subsequent calls are no-ops once auth has been resolved.
+    /// </summary>
+    public void WarmAuth() => Task.Run(EnsureAuth);
 
     /// <summary>
     /// Parse an ADO URL extracting org, project, and optional buildId/PR number.
@@ -357,6 +385,9 @@ public sealed class AdoCiProvider : ICiProvider
         var failures = new List<CiJobFailure>();
         var cancelled = new List<CiJobInfo>();
 
+        // ── Pass 1 ─── classify all jobs, collect failed-job work items in
+        // timeline order. No I/O yet — this is pure JSON inspection.
+        var failedJobs = new List<FailedJobItem>();
         foreach (var rec in records)
         {
             var type = rec?["type"]?.GetValue<string>();
@@ -378,122 +409,86 @@ public sealed class AdoCiProvider : ICiProvider
 
             summary.Failed++;
 
-            // Find the failed task within this job (needed at all detail levels for job name + type)
             var jobRecordId = rec?["id"]?.GetValue<string>();
-            CiStepInfo? failedTask = null;
-            string? failedLogId = null;
+            var (failedTask, failedLogId) = FindFailedTask(records, jobRecordId);
 
-            // summary detail level: include minimal failure info (no log downloads)
-            if (query.Detail == "summary")
-            {
-                foreach (var task in records)
-                {
-                    if (task?["type"]?.GetValue<string>() != "Task") continue;
-                    if (task?["parentId"]?.GetValue<string>() != jobRecordId) continue;
-                    if (task?["result"]?.GetValue<string>() == "failed")
-                    {
-                        var logRef = task["log"];
-                        failedLogId = logRef?["id"]?.GetValue<int>().ToString();
-                        failedTask = new CiStepInfo
-                        {
-                            Number = task["order"]?.GetValue<int>() ?? 0,
-                            Name = task["name"]?.GetValue<string>() ?? "unknown",
-                            Source = "timeline",
-                        };
-                        break;
-                    }
-                }
-                failures.Add(new CiJobFailure
-                {
-                    Name = name,
-                    JobId = failedLogId != null ? $"{buildId}:{failedLogId}" : buildId.ToString(),
-                    BuildId = buildId.ToString(),
-                    Conclusion = result,
-                    FailedStep = failedTask,
-                    FailureType = failedTask != null
-                        ? LogParser.ClassifyStepType(failedTask.Name) is "unknown" ? null : LogParser.ClassifyStepType(failedTask.Name)
-                        : null,
-                });
-                continue;
-            }
+            failedJobs.Add(new FailedJobItem(
+                Name: name,
+                JobRecordId: jobRecordId,
+                Result: result,
+                FailedTask: failedTask,
+                FailedLogId: failedLogId));
+        }
 
-            // Find the failed task within this job
+        // ── Pass 2 ─── parallel-fetch logs for detail=errors so per-job log
+        // downloads run concurrently (bounded) instead of sequentially. This
+        // is the main lever for "large first request" timeouts on builds with
+        // multiple failed jobs.
+        Dictionary<string, ParsedLog>? logsByLogId = null;
+        if (query.Detail == "errors")
+        {
+            logsByLogId = await FetchLogsInParallel(buildId, failedJobs);
+        }
 
-            foreach (var task in records)
-            {
-                if (task?["type"]?.GetValue<string>() != "Task") continue;
-                if (task?["parentId"]?.GetValue<string>() != jobRecordId) continue;
-                if (task?["result"]?.GetValue<string>() == "failed")
-                {
-                    var logRef = task["log"];
-                    failedLogId = logRef?["id"]?.GetValue<int>().ToString();
-                    failedTask = new CiStepInfo
-                    {
-                        Number = task["order"]?.GetValue<int>() ?? 0,
-                        Name = task["name"]?.GetValue<string>() ?? "unknown",
-                        Source = "timeline",
-                    };
-                    break;
-                }
-            }
-
+        // ── Pass 3 ─── assemble CiJobFailure records in timeline order using
+        // the prefetched logs (if any) and detect child/triggered builds.
+        foreach (var item in failedJobs)
+        {
             var failure = new CiJobFailure
             {
-                Name = name,
-                JobId = failedLogId != null ? $"{buildId}:{failedLogId}" : buildId.ToString(),
+                Name = item.Name,
+                JobId = item.FailedLogId != null ? $"{buildId}:{item.FailedLogId}" : buildId.ToString(),
                 BuildId = buildId.ToString(),
-                Conclusion = result,
-                FailedStep = failedTask,
-                // Classify from task name when available (works at all detail levels)
-                FailureType = failedTask != null
-                    ? LogParser.ClassifyStepType(failedTask.Name) is "unknown" ? null : LogParser.ClassifyStepType(failedTask.Name)
+                Conclusion = item.Result,
+                FailedStep = item.FailedTask,
+                FailureType = item.FailedTask != null
+                    ? LogParser.ClassifyStepType(item.FailedTask.Name) is "unknown" ? null : LogParser.ClassifyStepType(item.FailedTask.Name)
                     : null,
             };
 
-            if (query.Detail == "errors" && failedLogId != null)
+            if (query.Detail == "summary")
             {
-                try
+                failures.Add(failure);
+                continue;
+            }
+
+            if (query.Detail == "errors"
+                && item.FailedLogId != null
+                && logsByLogId != null
+                && logsByLogId.TryGetValue(item.FailedLogId, out var log))
+            {
+                var allErrors = new List<CiExtractedError>();
+                foreach (var step in log.Steps.Length > 0 ? log.Steps : [new ParsedStep { Number = 1, Name = item.Name, StartLine = 0, EndLine = log.Lines.Length - 1 }])
                 {
-                    var log = await GetJobLogAsync($"{buildId}:{failedLogId}");
-
-                    // Use the universal error extraction pipeline
-                    var allErrors = new List<CiExtractedError>();
-                    foreach (var step in log.Steps.Length > 0 ? log.Steps : [new ParsedStep { Number = 1, Name = name, StartLine = 0, EndLine = log.Lines.Length - 1 }])
+                    var meaningful = LogParser.ExtractMeaningfulErrors(log.Lines, step, query.MaxErrors);
+                    foreach (var err in meaningful)
                     {
-                        var meaningful = LogParser.ExtractMeaningfulErrors(log.Lines, step, query.MaxErrors);
-                        foreach (var err in meaningful)
+                        if (allErrors.Count >= query.MaxErrors) break;
+                        var parsed = LogParser.TryParseError(err);
+                        allErrors.Add(new CiExtractedError
                         {
-                            if (allErrors.Count >= query.MaxErrors) break;
-                            var parsed = LogParser.TryParseError(err);
-                            allErrors.Add(new CiExtractedError
-                            {
-                                Raw = err,
-                                Code = parsed?.Code,
-                                Message = parsed?.Message,
-                                File = parsed?.File,
-                                SourceLine = parsed?.Line,
-                            });
-                        }
-                    }
-
-                    if (allErrors.Count > 0)
-                    {
-                        failure = failure with
-                        {
-                            Errors = allErrors.ToArray(),
-                            FailureType = ClassifyAdoFailureType(allErrors),
-                            Diagnosis = SynthesizeAdoDiagnosis(allErrors),
-                        };
+                            Raw = err,
+                            Code = parsed?.Code,
+                            Message = parsed?.Message,
+                            File = parsed?.File,
+                            SourceLine = parsed?.Line,
+                        });
                     }
                 }
-                catch (Exception ex)
+
+                if (allErrors.Count > 0)
                 {
-                    Console.Error.WriteLine($"ci-debug-mcp: ADO log retrieval failed for build {buildId}: {ex.Message}");
+                    failure = failure with
+                    {
+                        Errors = allErrors.ToArray(),
+                        FailureType = ClassifyAdoFailureType(allErrors),
+                        Diagnosis = SynthesizeAdoDiagnosis(allErrors),
+                    };
                 }
             }
 
             // Detect child/triggered builds from the timeline
-            var childBuildIds = DetectChildBuilds(records, jobRecordId);
+            var childBuildIds = DetectChildBuilds(records, item.JobRecordId);
             if (childBuildIds.Count > 0)
             {
                 failure = failure with
@@ -513,6 +508,97 @@ public sealed class AdoCiProvider : ICiProvider
             Failures = failures.ToArray(),
             Cancelled = cancelled.ToArray(),
         };
+    }
+
+    /// <summary>
+    /// Per-failed-job descriptor produced by the first pass of
+    /// <see cref="GetFailuresFromBuildAsync"/>. Carries the timeline-derived
+    /// information needed to assemble a <see cref="CiJobFailure"/> after
+    /// per-job log downloads complete.
+    /// </summary>
+    private sealed record FailedJobItem(
+        string Name,
+        string? JobRecordId,
+        string? Result,
+        CiStepInfo? FailedTask,
+        string? FailedLogId);
+
+    /// <summary>
+    /// Walk the timeline records once to find the first failed Task under the
+    /// given job and return both the task descriptor and its log id. No I/O.
+    /// </summary>
+    private static (CiStepInfo? Task, string? LogId) FindFailedTask(
+        System.Text.Json.Nodes.JsonArray records, string? jobRecordId)
+    {
+        foreach (var task in records)
+        {
+            if (task?["type"]?.GetValue<string>() != "Task") continue;
+            if (task?["parentId"]?.GetValue<string>() != jobRecordId) continue;
+            if (task?["result"]?.GetValue<string>() != "failed") continue;
+
+            var logRef = task["log"];
+            var failedLogId = logRef?["id"]?.GetValue<int>().ToString();
+            var failedTask = new CiStepInfo
+            {
+                Number = task["order"]?.GetValue<int>() ?? 0,
+                Name = task["name"]?.GetValue<string>() ?? "unknown",
+                Source = "timeline",
+            };
+            return (failedTask, failedLogId);
+        }
+        return (null, null);
+    }
+
+    /// <summary>
+    /// Fetch the per-job logs for every failed job in parallel with bounded
+    /// concurrency (<see cref="LogFetchConcurrency"/>). Each log id appears
+    /// at most once in the result regardless of how many jobs reference it.
+    /// Individual fetch failures are logged and skipped — the surrounding
+    /// assembly step then treats the missing log as "no errors extracted",
+    /// preserving the prior single-job-fails-don't-fail-the-report semantics.
+    /// </summary>
+    private async Task<Dictionary<string, ParsedLog>> FetchLogsInParallel(
+        int buildId, IReadOnlyList<FailedJobItem> failedJobs)
+    {
+        // De-duplicate by log id so we don't fetch the same log twice.
+        var logIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in failedJobs)
+        {
+            if (item.FailedLogId != null) logIds.Add(item.FailedLogId);
+        }
+        if (logIds.Count == 0) return [];
+
+        using var sem = new SemaphoreSlim(LogFetchConcurrency);
+        var fetchTasks = logIds.Select(async logId =>
+        {
+            await sem.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                try
+                {
+                    var log = await GetJobLogAsync($"{buildId}:{logId}").ConfigureAwait(false);
+                    return (logId, log);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(
+                        $"ci-debug-mcp: ADO log retrieval failed for build {buildId} log {logId}: {ex.Message}");
+                    return (logId, (ParsedLog?)null);
+                }
+            }
+            finally
+            {
+                sem.Release();
+            }
+        }).ToArray();
+
+        var results = await Task.WhenAll(fetchTasks).ConfigureAwait(false);
+        var dict = new Dictionary<string, ParsedLog>(StringComparer.Ordinal);
+        foreach (var (logId, log) in results)
+        {
+            if (log != null) dict[logId] = log;
+        }
+        return dict;
     }
 
     /// <summary>
@@ -708,19 +794,32 @@ public sealed class AdoCiProvider : ICiProvider
     private void EnsureAuth()
     {
         if (_authResolved) return;
-        _authResolved = true;
 
-        var auth = ResolveAdoAuth();
-        if (auth != null)
+        // Lock so concurrent callers (e.g. WarmAuth's background task and the
+        // first real API call) cannot both proceed past the gate and race on
+        // setting _authResolved before DefaultRequestHeaders.Authorization is
+        // populated. Double-check inside the lock for the common fast path.
+        lock (_authLock)
         {
-            _http.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue(auth.Scheme, auth.Token);
-            Console.Error.WriteLine($"ci-debug-mcp: ADO authenticated via {auth.Scheme}");
-        }
-        else
-        {
-            Console.Error.WriteLine("ci-debug-mcp: no ADO authentication found. " +
-                "Set AZURE_DEVOPS_PAT or SYSTEM_ACCESSTOKEN.");
+            if (_authResolved) return;
+
+            var auth = ResolveAdoAuth();
+            if (auth != null)
+            {
+                _http.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue(auth.Scheme, auth.Token);
+                Console.Error.WriteLine($"ci-debug-mcp: ADO authenticated via {auth.Scheme}");
+            }
+            else
+            {
+                Console.Error.WriteLine("ci-debug-mcp: no ADO authentication found. " +
+                    "Set AZURE_DEVOPS_PAT or SYSTEM_ACCESSTOKEN.");
+            }
+
+            // Only mark resolved *after* the header is in place so other
+            // callers observing _authResolved == true see a fully-configured
+            // HttpClient.
+            _authResolved = true;
         }
     }
 
@@ -730,8 +829,11 @@ public sealed class AdoCiProvider : ICiProvider
     /// </summary>
     internal void ResetAuth()
     {
-        _authResolved = false;
-        _http.DefaultRequestHeaders.Authorization = null;
+        lock (_authLock)
+        {
+            _authResolved = false;
+            _http.DefaultRequestHeaders.Authorization = null;
+        }
         Console.Error.WriteLine("ci-debug-mcp: ADO auth reset — will re-resolve on next call");
     }
 
@@ -788,6 +890,11 @@ public sealed class AdoCiProvider : ICiProvider
                 : "account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv";
             var psi = new ProcessStartInfo(fileName, arguments)
             {
+                // RedirectStandardInput prevents the child from inheriting the
+                // MCP server's stdin pipe. Without this, cmd.exe / az.cmd /
+                // conhost.exe can block reading from the inherited stdin — the
+                // same hang documented in GitHubClient.GetGitConfigValue.
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -795,8 +902,28 @@ public sealed class AdoCiProvider : ICiProvider
             };
             using var proc = Process.Start(psi);
             if (proc == null) return null;
-            var token = proc.StandardOutput.ReadToEnd().Trim();
-            if (!proc.WaitForExit(15_000)) return null;
+
+            // Close stdin immediately so any read attempt sees EOF.
+            proc.StandardInput.Close();
+
+            // Drain stderr concurrently with stdout. Without this, a chatty
+            // subprocess can fill the stderr pipe buffer (~4 KB on Windows)
+            // and block on write, while we block reading stdout.
+            var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
+            var stdoutTask = Task.Run(() => proc.StandardOutput.ReadToEnd());
+
+            if (!proc.WaitForExit(10_000))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                Console.Error.WriteLine("ci-debug-mcp: az CLI token retrieval timed out");
+                return null;
+            }
+
+            // After WaitForExit, stdout/stderr have been closed so the drain
+            // tasks complete promptly.
+            var token = stdoutTask.GetAwaiter().GetResult().Trim();
+            _ = stderrTask.GetAwaiter().GetResult();
+
             return proc.ExitCode == 0 && token.Length > 0 ? token : null;
         }
         catch (Exception ex)
@@ -818,12 +945,31 @@ public sealed class AdoCiProvider : ICiProvider
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            // Prevent UI prompts and terminal prompts — fail fast if GCM can't
+            // resolve non-interactively. Without these, GCM can pop a browser
+            // window or block on a tty read on first use.
+            psi.Environment["GCM_INTERACTIVE"] = "never";
+            psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+
             using var proc = Process.Start(psi);
             if (proc == null) return null;
             proc.StandardInput.Write($"protocol=https\nhost={host}\n\n");
             proc.StandardInput.Close();
-            var output = proc.StandardOutput.ReadToEnd();
-            if (!proc.WaitForExit(10_000)) return null;
+
+            // Drain stderr concurrently to avoid pipe-buffer-fills deadlocks.
+            var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
+            var stdoutTask = Task.Run(() => proc.StandardOutput.ReadToEnd());
+
+            if (!proc.WaitForExit(5_000))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                Console.Error.WriteLine($"ci-debug-mcp: GCM credential lookup for {host} timed out");
+                return null;
+            }
+
+            var output = stdoutTask.GetAwaiter().GetResult();
+            _ = stderrTask.GetAwaiter().GetResult();
+
             if (proc.ExitCode != 0) return null;
 
             foreach (var line in output.Split('\n'))
