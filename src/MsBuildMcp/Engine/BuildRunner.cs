@@ -409,8 +409,8 @@ public sealed class BuildManager : IDisposable
             if (buildId != null && _currentBuild.BuildId != buildId) return null;
 
             _currentBuild.Cancel();
-            // Give it a moment to exit
-            Thread.Sleep(200);
+            // Wait briefly for the process to exit after Kill — returns early if it does
+            _currentBuild.WaitForNews(200);
             var status = _currentBuild.GetStatus();
             if (!status.IsCompleted)
                 status = status with { Status = "cancelled" };
