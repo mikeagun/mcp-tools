@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text.Json.Nodes;

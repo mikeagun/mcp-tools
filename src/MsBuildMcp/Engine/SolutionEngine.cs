@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 

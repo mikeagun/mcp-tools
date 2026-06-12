@@ -1,4 +1,4 @@
-// Copyright (c) MsBuildMcp contributors
+// Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
 using System.Text.Json.Nodes;

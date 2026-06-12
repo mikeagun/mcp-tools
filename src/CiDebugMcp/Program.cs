@@ -1,3 +1,6 @@
+// Copyright (c) McpSharp contributors
+// SPDX-License-Identifier: MIT
+
 using CiDebugMcp.Engine;
 using McpSharp;
 using CiDebugMcp.Tools;

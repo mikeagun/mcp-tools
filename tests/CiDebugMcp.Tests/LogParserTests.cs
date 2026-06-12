@@ -1,4 +1,4 @@
-// Copyright (c) ci-debug-mcp contributors
+// Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
 using CiDebugMcp.Engine;

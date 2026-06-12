@@ -1,4 +1,4 @@
-// Copyright (c) HyperV MCP contributors
+// Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
 using System.Management.Automation;
