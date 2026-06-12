@@ -492,6 +492,77 @@ public sealed class BuildManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Start a dotnet publish or return the current running build's status.
+    /// Shares the single-active-build constraint with StartOrPoll.
+    /// </summary>
+    public BuildStatus StartPublish(
+        string projectPath,
+        string configuration,
+        string? runtime,
+        string? framework,
+        string? output,
+        bool? selfContained,
+        string? additionalArgs,
+        int timeoutSeconds,
+        string retention = "full")
+    {
+        var normalizedPath = Path.GetFullPath(projectPath);
+
+        lock (_lock)
+        {
+            if (_currentBuild != null && !_currentBuild.IsCompleted)
+            {
+                // Release lock during wait
+                var job = _currentBuild;
+                Monitor.Exit(_lock);
+                try
+                {
+                    job.WaitForNews(timeoutSeconds * 1000);
+                }
+                finally
+                {
+                    Monitor.Enter(_lock);
+                }
+
+                var status = _currentBuild!.GetStatus();
+
+                // Always report collision — a publish was requested but a build/publish is running
+                status.Collision = new BuildCollision
+                {
+                    RequestedSolution = normalizedPath,
+                    RequestedTargets = "publish",
+                    RunningSolution = _currentBuild.SolutionPath,
+                    RunningTargets = _currentBuild.Targets,
+                };
+
+                ArchiveIfCompletedLocked();
+                return status;
+            }
+        }
+
+        // Same single-threaded MCP dispatch safety note as StartOrPoll applies here.
+
+        var args = PublishArgs(projectPath, configuration, runtime, framework,
+            output, selfContained, additionalArgs);
+        var psi = CreatePublishProcessStartInfo(projectPath, args);
+        var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";
+        var command = $"dotnet {string.Join(" ", args)}";
+
+        var newJob = new BuildJob(psi, buildId, command, normalizedPath, "publish", retention);
+
+        lock (_lock)
+        {
+            _currentBuild?.Dispose();
+            _currentBuild = newJob;
+        }
+
+        newJob.WaitForNews(timeoutSeconds * 1000);
+        var result = newJob.GetStatus();
+        ArchiveIfCompleted();
+        return result;
+    }
+
     internal static List<string> BuildArgs(string solutionPath, string? targets,
         string configuration, string platform, bool restore, string? additionalArgs)
     {
@@ -513,6 +584,48 @@ public sealed class BuildManager : IDisposable
         args.Add("/v:minimal");
 
         return args;
+    }
+
+    internal static List<string> PublishArgs(string projectPath,
+        string configuration, string? runtime, string? framework,
+        string? output, bool? selfContained, string? additionalArgs)
+    {
+        var args = new List<string>
+        {
+            "publish",
+            $"\"{projectPath}\"",
+            "-c", configuration,
+            "--nologo",
+            "-v", "minimal",
+        };
+
+        if (!string.IsNullOrEmpty(runtime))
+            args.AddRange(["-r", runtime]);
+        if (!string.IsNullOrEmpty(framework))
+            args.AddRange(["-f", framework]);
+        if (!string.IsNullOrEmpty(output))
+            args.AddRange(["-o", $"\"{output}\""]);
+        if (selfContained.HasValue)
+            args.Add($"--self-contained={selfContained.Value.ToString().ToLowerInvariant()}");
+        if (!string.IsNullOrEmpty(additionalArgs))
+            args.Add(additionalArgs);
+
+        return args;
+    }
+
+    private static ProcessStartInfo CreatePublishProcessStartInfo(
+        string projectPath, List<string> args)
+    {
+        return new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = string.Join(" ", args),
+            WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath)),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
     }
 
     private static ProcessStartInfo CreateProcessStartInfo(VsToolchain toolchain,

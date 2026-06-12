@@ -7,7 +7,7 @@ using McpSharp.Policy;
 namespace MsBuildMcp.Policy;
 
 /// <summary>
-/// Tool classifier for msbuild-mcp. Only build/cancel_build require confirmation.
+/// Tool classifier for msbuild-mcp. Build, publish, and cancel_build require confirmation.
 /// </summary>
 public sealed class MsBuildToolClassifier : IToolClassifier
 {
@@ -16,6 +16,7 @@ public sealed class MsBuildToolClassifier : IToolClassifier
         return toolName switch
         {
             "build" => PolicyDecision.Confirm,
+            "publish" => PolicyDecision.Confirm,
             "cancel_build" => PolicyDecision.Confirm,
             _ => PolicyDecision.Allow,
         };

@@ -9,7 +9,8 @@ namespace MsBuildMcp.Policy;
 
 /// <summary>
 /// Rule matcher for msbuild-mcp. Matches the "sln_path" constraint
-/// against the tool call's sln_path argument.
+/// against the tool call's sln_path argument (build), and the "project_path"
+/// constraint against the tool call's project_path argument (publish).
 /// </summary>
 public sealed class MsBuildRuleMatcher : IRuleMatcher
 {
@@ -26,6 +27,18 @@ public sealed class MsBuildRuleMatcher : IRuleMatcher
             if (ruleSln == null || argSln == null)
                 return false;
             if (!string.Equals(NormalizePath(ruleSln), NormalizePath(argSln),
+                StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        // project_path constraint (used by the publish tool).
+        if (rule.Constraints.TryGetValue("project_path", out var projectElement))
+        {
+            var ruleProject = projectElement.GetString();
+            var argProject = args["project_path"]?.GetValue<string>();
+            if (ruleProject == null || argProject == null)
+                return false;
+            if (!string.Equals(NormalizePath(ruleProject), NormalizePath(argProject),
                 StringComparison.OrdinalIgnoreCase))
                 return false;
         }

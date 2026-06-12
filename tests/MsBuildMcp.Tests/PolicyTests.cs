@@ -183,6 +183,50 @@ public class RuleMatcherConfigTests
 }
 
 // =============================================================================
+// MsBuildRuleMatcher: project_path constraint matching (publish tool)
+// =============================================================================
+
+public class RuleMatcherProjectPathTests
+{
+    private readonly MsBuildRuleMatcher _matcher = new();
+
+    [Fact]
+    public void ProjectPath_ExactMatch_MatchesPublish()
+    {
+        var rule = PublishRule(Norm("C:\\projects\\AppA.csproj"));
+        var args = PublishArgs("C:\\projects\\AppA.csproj");
+        Assert.True(_matcher.Matches(rule, "publish", args));
+    }
+
+    [Fact]
+    public void ProjectPath_DifferentPath_DoesNotMatch()
+    {
+        // Regression: project_path-constrained rule for AppA must NOT match a call for AppB.
+        // Otherwise the "Allow publish of AppA.csproj" elicitation option would silently
+        // behave identically to "Allow all publish".
+        var rule = PublishRule(Norm("C:\\projects\\AppA.csproj"));
+        var args = PublishArgs("C:\\projects\\AppB.csproj");
+        Assert.False(_matcher.Matches(rule, "publish", args));
+    }
+
+    [Fact]
+    public void ProjectPath_CaseInsensitive_Matches()
+    {
+        var rule = PublishRule(Norm("C:\\projects\\AppA.csproj"));
+        var args = PublishArgs("c:\\PROJECTS\\appa.CSPROJ");
+        Assert.True(_matcher.Matches(rule, "publish", args));
+    }
+
+    [Fact]
+    public void ProjectPath_AbsentInCall_DoesNotMatch()
+    {
+        var rule = PublishRule(Norm("C:\\projects\\AppA.csproj"));
+        var args = new JsonObject(); // no project_path supplied
+        Assert.False(_matcher.Matches(rule, "publish", args));
+    }
+}
+
+// =============================================================================
 // MsBuildOptionGenerator: context-dependent scope options
 // =============================================================================
 
@@ -676,6 +720,23 @@ internal static class PolicyTestHelpers
         if (targets != null) args["targets"] = targets;
         if (config != null) args["configuration"] = config;
         return args;
+    }
+
+    public static JsonObject PublishArgs(string projectPath)
+    {
+        return new JsonObject { ["project_path"] = projectPath };
+    }
+
+    public static ApprovalRule PublishRule(string normalizedProjectPath)
+    {
+        return new ApprovalRule
+        {
+            Tools = ["publish"],
+            Constraints = new Dictionary<string, JsonElement>
+            {
+                ["project_path"] = JsonSerializer.SerializeToElement(normalizedProjectPath),
+            },
+        };
     }
 
     public static string Norm(string path) => MsBuildRuleMatcher.NormalizePath(path);

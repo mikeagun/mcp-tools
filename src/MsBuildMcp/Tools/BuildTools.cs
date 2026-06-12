@@ -118,6 +118,111 @@ public static class BuildTools
 
         server.RegisterTool(new ToolInfo
         {
+            Name = "publish",
+            Description = "Run 'dotnet publish' for a .NET project. Produces deployment-ready output " +
+                          "(framework-dependent or self-contained). Shares the build/publish constraint — " +
+                          "use get_build_status to poll, cancel_build to stop. " +
+                          "Only SDK-style .NET projects (.csproj) are supported.",
+            InputSchema = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["project_path"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Path to .csproj or .sln file to publish",
+                    },
+                    ["configuration"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["default"] = "Release",
+                        ["description"] = "Build configuration (default: Release)",
+                    },
+                    ["runtime"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Target runtime identifier (e.g. 'win-x64', 'linux-x64'). " +
+                                          "Optional — omit to use the current platform's default.",
+                    },
+                    ["framework"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Target framework (e.g. 'net9.0'). Optional — defaults to " +
+                                          "the project's target framework.",
+                    },
+                    ["output"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Output directory. Optional — defaults to dotnet's default " +
+                                          "publish location.",
+                    },
+                    ["self_contained"] = new JsonObject
+                    {
+                        ["type"] = "boolean",
+                        ["description"] = "Publish as self-contained (includes .NET runtime). " +
+                                          "Default: framework-dependent.",
+                    },
+                    ["additional_args"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Additional dotnet publish arguments",
+                    },
+                    ["timeout"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["description"] = "Max seconds to wait. 0 = start and return immediately. " +
+                                          "Default 30, max 45. Returns early if a new error is detected.",
+                        ["default"] = 30,
+                        ["maximum"] = MaxTimeoutSeconds,
+                    },
+                    ["retention"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["enum"] = new JsonArray("full", "tail"),
+                        ["description"] = "Output retention: 'full' (default, searchable) or " +
+                                          "'tail' (1K-line ring buffer, lightweight).",
+                        ["default"] = "full",
+                    },
+                },
+                ["required"] = new JsonArray("project_path"),
+            },
+            Handler = args =>
+            {
+                var projectPath = args["project_path"]!.GetValue<string>();
+
+                // Validate: only SDK-style .NET projects are supported
+                var ext = Path.GetExtension(projectPath);
+                if (ext.Equals(".vcxproj", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".vcproj", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".wixproj", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"Publish is only supported for SDK-style .NET projects. " +
+                        $"For {ext} projects, use the 'build' tool.");
+                }
+
+                var config = args["configuration"]?.GetValue<string>() ?? "Release";
+                var runtime = args["runtime"]?.GetValue<string>();
+                var framework = args["framework"]?.GetValue<string>();
+                var output = args["output"]?.GetValue<string>();
+                var selfContained = args["self_contained"]?.GetValue<bool>();
+                var additionalArgs = args["additional_args"]?.GetValue<string>();
+                var retention = args["retention"]?.GetValue<string>() ?? "full";
+                var (timeout, timeoutClamped) = ClampTimeout(args["timeout"]?.GetValue<int>() ?? 30);
+
+                var status = buildManager.StartPublish(projectPath, config, runtime, framework,
+                    output, selfContained, additionalArgs, timeout, retention);
+                var json = StatusToJson(status);
+                if (timeoutClamped)
+                    json["timeout_clamped"] = $"Requested timeout exceeded max ({MaxTimeoutSeconds}s). " +
+                        "Use get_build_status to continue polling.";
+                return json;
+            },
+        });
+
+        server.RegisterTool(new ToolInfo
+        {
             Name = "get_build_status",
             Description = "Poll the current or most recent build. Set 'timeout' to wait for the build " +
                           "to complete or for new errors to appear — returns early on either event. " +
