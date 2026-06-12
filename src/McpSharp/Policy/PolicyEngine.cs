@@ -16,9 +16,10 @@ public sealed class PolicyEngine
     private readonly IToolClassifier _classifier;
     private readonly IRuleMatcher _matcher;
     private readonly string? _policyFilePath;
+    private readonly string _defaultFileName;
     private readonly object _fileLock = new();
 
-    private PolicyConfig _config;
+    private volatile PolicyConfig _config;
     private readonly List<ApprovalRule> _sessionApprovals = [];
     private readonly List<ApprovalRule> _sessionDenials = [];
     private readonly object _sessionLock = new();
@@ -27,12 +28,14 @@ public sealed class PolicyEngine
     public string? PolicyFilePath => _policyFilePath;
 
     public PolicyEngine(PolicyConfig config, IToolClassifier classifier,
-        IRuleMatcher matcher, string? policyFilePath = null)
+        IRuleMatcher matcher, string? policyFilePath = null,
+        string? defaultFileName = null)
     {
         _config = config;
         _classifier = classifier;
         _matcher = matcher;
         _policyFilePath = policyFilePath;
+        _defaultFileName = defaultFileName ?? "policy.json";
     }
 
     // -- Loading -------------------------------------------------------------
@@ -71,7 +74,8 @@ public sealed class PolicyEngine
             config = new TConfig();
         }
 
-        return new PolicyEngine(config, classifier, matcher, path);
+        return new PolicyEngine(config, classifier, matcher, path,
+            defaultFileName: defaultFileName ?? "policy.json");
     }
 
     public static string DefaultPolicyFilePath(string fileName)
@@ -158,20 +162,21 @@ public sealed class PolicyEngine
     private void SaveRuleInternal(ApprovalRule rule, string? reason, bool isDeny)
     {
         var filePath = _policyFilePath
-            ?? DefaultPolicyFilePath("policy.json");
+            ?? DefaultPolicyFilePath(_defaultFileName);
 
         lock (_fileLock)
         {
-            PolicyConfig current;
+            // Read existing file as JSON tree to preserve all fields (including
+            // server-specific config like build_constraints, vm_allowlist, etc.).
+            JsonObject root;
             if (File.Exists(filePath))
             {
                 var json = File.ReadAllText(filePath);
-                current = JsonSerializer.Deserialize<PolicyConfig>(json, PolicyConfig.JsonOptions)
-                    ?? new PolicyConfig();
+                root = JsonNode.Parse(json)?.AsObject() ?? new JsonObject();
             }
             else
             {
-                current = new PolicyConfig();
+                root = new JsonObject();
             }
 
             var entry = new UserRule
@@ -181,23 +186,38 @@ public sealed class PolicyEngine
                 Rule = rule,
             };
 
+            // Add rule to JSON tree.
+            var key = isDeny ? "deny_rules" : "user_rules";
+            if (root[key] is not JsonArray rulesArray)
+            {
+                rulesArray = new JsonArray();
+                root[key] = rulesArray;
+            }
+            rulesArray.Add(JsonSerializer.SerializeToNode(entry, PolicyConfig.JsonOptions));
+
+            // Write atomically via temp file + rename.
+            var tempPath = filePath + ".tmp";
+            File.WriteAllText(tempPath, root.ToJsonString(PolicyConfig.JsonOptions));
+            File.Move(tempPath, filePath, overwrite: true);
+
+            // Update in-memory config: create new list instances so concurrent
+            // readers (Evaluate → MatchesAny) see either old or new list, never
+            // a half-modified one. Preserves the server-specific config type.
             if (isDeny)
             {
-                current.DenyRules ??= [];
-                current.DenyRules.Add(entry);
+                var updated = _config.DenyRules != null
+                    ? new List<UserRule>(_config.DenyRules) : [];
+                updated.Add(entry);
+                _config.DenyRules = updated;
             }
             else
             {
-                current.UserRules ??= [];
-                current.UserRules.Add(entry);
+                var updated = _config.UserRules != null
+                    ? new List<UserRule>(_config.UserRules) : [];
+                updated.Add(entry);
+                _config.UserRules = updated;
             }
 
-            var tempPath = filePath + ".tmp";
-            File.WriteAllText(tempPath,
-                JsonSerializer.Serialize(current, PolicyConfig.JsonOptions));
-            File.Move(tempPath, filePath, overwrite: true);
-
-            _config = current;
             Console.Error.WriteLine(
                 $"policy: saved {(isDeny ? "deny" : "allow")} rule to {filePath}");
         }

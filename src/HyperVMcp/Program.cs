@@ -94,7 +94,8 @@ public static class Program
             commandRunner.GetCommand(commandId)?.SessionId;
         var matcher = new HyperVRuleMatcher(classifier);
         var optionGenerator = new HyperVOptionGenerator(classifier);
-        var policy = new PolicyEngine(hvConfig, classifier, matcher, resolvedPolicyPath);
+        var policy = new PolicyEngine(hvConfig, classifier, matcher, resolvedPolicyPath,
+            defaultFileName: "hyperv-mcp-policy.json");
 
         // Create MCP server and register tools.
         var server = new McpServer("hyperv-mcp");
