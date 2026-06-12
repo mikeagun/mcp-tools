@@ -91,6 +91,42 @@ public class SolutionEngineTests : IDisposable
     }
 
     [Fact]
+    public void HandlesCircularNesting()
+    {
+        // Create a .sln with circular NestedProjects: folderA → folderB → folderA
+        var circularSln = """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "folderA", "folderA", "{AAAA0000-0000-0000-0000-000000000001}"
+            EndProject
+            Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "folderB", "folderB", "{AAAA0000-0000-0000-0000-000000000002}"
+            EndProject
+            Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "lib", "lib\lib.vcxproj", "{BBBB0000-0000-0000-0000-000000000001}"
+            EndProject
+            Global
+            	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+            		Debug|x64 = Debug|x64
+            	EndGlobalSection
+            	GlobalSection(NestedProjects) = preSolution
+            		{AAAA0000-0000-0000-0000-000000000001} = {AAAA0000-0000-0000-0000-000000000002}
+            		{AAAA0000-0000-0000-0000-000000000002} = {AAAA0000-0000-0000-0000-000000000001}
+            		{BBBB0000-0000-0000-0000-000000000001} = {AAAA0000-0000-0000-0000-000000000001}
+            	EndGlobalSection
+            EndGlobal
+            """;
+
+        var circularSlnPath = Path.Combine(_testSlnDir, "circular.sln");
+        File.WriteAllText(circularSlnPath, circularSln);
+
+        var engine = new SolutionEngine();
+        // Must not hang — cycle detection should break the infinite loop
+        var info = engine.Parse(circularSlnPath);
+
+        var lib = info.Projects.First(p => p.Name == "lib");
+        // SolutionFolder should be populated (partial traversal) without infinite loop
+        Assert.NotNull(lib.SolutionFolder);
+    }
+
+    [Fact]
     public void ThrowsOnMissingFile()
     {
         var engine = new SolutionEngine();

@@ -73,8 +73,9 @@ public sealed class ProjectEngine : IDisposable
             proc.WaitForExit();
             return string.IsNullOrEmpty(path) ? null : path;
         }
-        catch
+        catch (Exception ex)
         {
+            Console.Error.WriteLine($"msbuild-mcp: vswhere failed: {ex.Message}");
             return null;
         }
     }
@@ -95,7 +96,12 @@ public sealed class ProjectEngine : IDisposable
         solutionDir ??= InferSolutionDir(projectPath);
 
         var mtime = File.GetLastWriteTimeUtc(projectPath);
-        var key = $"{projectPath}|{configuration}|{platform}|{solutionDir}";
+        var propsKey = additionalProperties is { Count: > 0 }
+            ? string.Join(",", additionalProperties
+                .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => $"{kv.Key}={kv.Value}"))
+            : "";
+        var key = $"{projectPath}|{configuration}|{platform}|{solutionDir}|{propsKey}";
 
         if (_cache.TryGetValue(key, out var cached) && cached.Mtime == mtime)
             return cached.Snapshot;

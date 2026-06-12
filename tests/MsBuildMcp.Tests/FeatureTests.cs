@@ -450,6 +450,31 @@ public class FeatureTests : IDisposable
         Assert.DoesNotContain("Tests", nodes);
     }
 
+    // --- ProjectEngine cache key with additionalProperties ---
+
+    [Fact]
+    public void EvaluateCacheKeyIncludesAdditionalProperties()
+    {
+        var projEngine = new ProjectEngine();
+        var coreProj = Path.Combine(_testSlnDir, "CoreLib", "CoreLib.csproj");
+
+        // Evaluate with additionalProperties A
+        var snapA = projEngine.Evaluate(coreProj, "Debug", "AnyCPU", _testSlnDir,
+            new Dictionary<string, string> { ["MyCustomProp"] = "ValueA" });
+
+        // Evaluate with additionalProperties B (same project, different props)
+        var snapB = projEngine.Evaluate(coreProj, "Debug", "AnyCPU", _testSlnDir,
+            new Dictionary<string, string> { ["MyCustomProp"] = "ValueB" });
+
+        // Both should have their respective property values (not cached from first call)
+        Assert.Equal("ValueA", snapA.AllProperties.GetValueOrDefault("MyCustomProp"));
+        Assert.Equal("ValueB", snapB.AllProperties.GetValueOrDefault("MyCustomProp"));
+
+        // Evaluate without additionalProperties should not have the custom property
+        var snapNone = projEngine.Evaluate(coreProj, "Debug", "AnyCPU", _testSlnDir);
+        Assert.False(snapNone.AllProperties.ContainsKey("MyCustomProp"));
+    }
+
     // --- find_property with exact name ---
 
     [Fact]

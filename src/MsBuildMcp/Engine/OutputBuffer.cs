@@ -12,11 +12,16 @@ namespace MsBuildMcp.Engine;
 ///   for overflow. Search/get transparently read from disk when lines were evicted.
 /// - "tail": retains only the last 1K lines in memory (no disk). Lightweight for fix loops.
 ///
+/// Lines exceeding MaxLineLengthBytes are truncated in memory but preserved in full on disk.
+/// Search and FindFirstMatch transparently search the full disk file when truncated lines
+/// exist, so agents can find patterns within oversized lines.
+///
 /// Thread-safe for concurrent AddLine (from build reader) and reads (from tool handlers).
 /// </summary>
 public sealed class OutputBuffer : IDisposable
 {
     public const long MaxMemoryBytes = 50 * 1024 * 1024; // 50MB
+    public const long MaxLineLengthBytes = 1 * 1024 * 1024; // 1MB per line
     public const int TailModeMaxLines = 1_000;
     private const int LineOverheadBytes = 40; // .NET string object overhead estimate
 
@@ -31,6 +36,7 @@ public sealed class OutputBuffer : IDisposable
     private int _totalLinesReceived;
     private bool _disposed;
     private bool _freed;
+    private bool _hasTruncatedLines;
 
     public OutputBuffer(string mode = "full", string? buildId = null)
     {
@@ -53,6 +59,9 @@ public sealed class OutputBuffer : IDisposable
     /// <summary>True if output has been explicitly freed.</summary>
     public bool IsFreed { get { lock (_lock) return _freed; } }
 
+    /// <summary>True if any lines were truncated in memory (full content on disk).</summary>
+    public bool HasTruncatedLines { get { lock (_lock) return _hasTruncatedLines; } }
+
     /// <summary>True if a disk spill file exists.</summary>
     public bool HasDiskSpill { get { lock (_lock) return _diskPath != null; } }
 
@@ -66,6 +75,25 @@ public sealed class OutputBuffer : IDisposable
             if (_freed) return;
 
             _totalLinesReceived++;
+            var rawByteCount = (long)Encoding.UTF8.GetByteCount(line);
+            var alreadyWrittenToDisk = false;
+
+            // Truncate oversized lines in memory but preserve full content on disk.
+            // This prevents unbounded memory growth from a single line while keeping
+            // the full content searchable via disk-backed Search/FindFirstMatch.
+            if (rawByteCount > MaxLineLengthBytes)
+            {
+                if (_mode == "full")
+                {
+                    EnsureDiskSpillLocked();
+                    try { _diskWriter!.WriteLine(line); }
+                    catch { /* best-effort disk write */ }
+                    alreadyWrittenToDisk = true;
+                }
+                line = TruncateLine(line, MaxLineLengthBytes);
+                _hasTruncatedLines = true;
+            }
+
             var lineBytes = (long)Encoding.UTF8.GetByteCount(line) + LineOverheadBytes;
 
             if (_mode == "tail")
@@ -81,7 +109,7 @@ public sealed class OutputBuffer : IDisposable
                 return;
             }
 
-            // Full mode: add to memory, spill to disk if cap exceeded
+            // Full mode: add (possibly truncated) line to memory
             _lines.Add(line);
             _memoryBytes += lineBytes;
 
@@ -98,13 +126,44 @@ public sealed class OutputBuffer : IDisposable
                 }
             }
 
-            // Stream new line to disk if spill file exists
-            if (_diskWriter != null)
+            // Stream to disk if spill file exists (skip if already written for oversized line)
+            if (_diskWriter != null && !alreadyWrittenToDisk)
             {
                 try { _diskWriter.WriteLine(line); }
                 catch { /* best-effort disk write */ }
             }
         }
+    }
+
+    /// <summary>
+    /// Truncate a line to fit within maxBytes (UTF-8) at a char boundary.
+    /// Appends a marker indicating the original size and that full content is on disk.
+    /// </summary>
+    internal static string TruncateLine(string line, long maxBytes)
+    {
+        var totalBytes = Encoding.UTF8.GetByteCount(line);
+        if (totalBytes <= maxBytes) return line;
+
+        // Reserve space for the truncation marker
+        var marker = $"... [LINE TRUNCATED: {totalBytes:N0} bytes total — full content preserved in build log on disk]";
+        var markerBytes = Encoding.UTF8.GetByteCount(marker);
+        var targetBytes = maxBytes - markerBytes;
+        if (targetBytes < 100) targetBytes = 100; // ensure at least some content
+
+        // Binary search for the char index that fits within targetBytes.
+        // This is simpler than incremental encoding and handles multi-byte chars correctly.
+        var lo = 0;
+        var hi = line.Length;
+        while (lo < hi)
+        {
+            var mid = lo + (hi - lo + 1) / 2;
+            if (Encoding.UTF8.GetByteCount(line.AsSpan(0, mid)) <= targetBytes)
+                lo = mid;
+            else
+                hi = mid - 1;
+        }
+
+        return string.Concat(line.AsSpan(0, lo), marker);
     }
 
     /// <summary>
@@ -208,6 +267,11 @@ public sealed class OutputBuffer : IDisposable
         {
             if (_freed) return null;
 
+            // When truncated lines exist, search the full disk file so patterns
+            // within oversized lines (truncated in memory) can still be found.
+            if (_hasTruncatedLines && _diskPath != null && File.Exists(_diskPath))
+                return FindFirstMatchInDisk(regex, 1, _totalLinesReceived);
+
             // Search disk file first (for evicted lines)
             if (_diskPath != null && File.Exists(_diskPath) && _firstLineNumber > 1)
             {
@@ -252,31 +316,41 @@ public sealed class OutputBuffer : IDisposable
 
             var allMatches = new List<SearchMatch>();
 
-            // Search disk file for evicted lines
-            if (_diskPath != null && File.Exists(_diskPath) && _firstLineNumber > 1)
-                SearchDiskFile(regex, contextLines, allMatches, 1, _firstLineNumber - 1);
-
-            // Search memory
-            for (var i = 0; i < _lines.Count; i++)
+            // When truncated lines exist, search the full disk file (which has
+            // untruncated content) instead of memory. This ensures agents can find
+            // patterns within oversized lines that were truncated in memory.
+            if (_hasTruncatedLines && _diskPath != null && File.Exists(_diskPath))
             {
-                if (!regex.IsMatch(_lines[i])) continue;
+                SearchDiskFile(regex, contextLines, allMatches, 1, _totalLinesReceived);
+            }
+            else
+            {
+                // Search disk file for evicted lines
+                if (_diskPath != null && File.Exists(_diskPath) && _firstLineNumber > 1)
+                    SearchDiskFile(regex, contextLines, allMatches, 1, _firstLineNumber - 1);
 
-                var lineNum = _firstLineNumber + i;
-                var ctxStart = Math.Max(0, i - contextLines);
-                var ctxEnd = Math.Min(_lines.Count - 1, i + contextLines);
-                var context = new List<string>();
-                for (var j = ctxStart; j <= ctxEnd; j++)
+                // Search memory
+                for (var i = 0; i < _lines.Count; i++)
                 {
-                    if (j == i) continue;
-                    context.Add($"{_firstLineNumber + j}: {_lines[j]}");
+                    if (!regex.IsMatch(_lines[i])) continue;
+
+                    var lineNum = _firstLineNumber + i;
+                    var ctxStart = Math.Max(0, i - contextLines);
+                    var ctxEnd = Math.Min(_lines.Count - 1, i + contextLines);
+                    var context = new List<string>();
+                    for (var j = ctxStart; j <= ctxEnd; j++)
+                    {
+                        if (j == i) continue;
+                        context.Add($"{_firstLineNumber + j}: {_lines[j]}");
+                    }
+
+                    allMatches.Add(new SearchMatch
+                    {
+                        Line = lineNum,
+                        Text = _lines[i],
+                        Context = context,
+                    });
                 }
-
-                allMatches.Add(new SearchMatch
-                {
-                    Line = lineNum,
-                    Text = _lines[i],
-                    Context = context,
-                });
             }
 
             var paged = allMatches.Skip(skip).Take(maxResults).ToList();
@@ -341,8 +415,11 @@ public sealed class OutputBuffer : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
         _diskWriter?.Dispose();
         // Clean up temp file
         if (_diskPath != null)
@@ -368,7 +445,9 @@ public sealed class OutputBuffer : IDisposable
 
         try
         {
-            using var reader = new StreamReader(_diskPath!, Encoding.UTF8);
+            // Open with FileShare.ReadWrite to coexist with the active StreamWriter
+            using var fs = new FileStream(_diskPath!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs, Encoding.UTF8);
             string? line;
             while ((line = reader.ReadLine()) != null)
             {
@@ -405,7 +484,9 @@ public sealed class OutputBuffer : IDisposable
 
         try
         {
-            using var reader = new StreamReader(_diskPath!, Encoding.UTF8);
+            // Open with FileShare.ReadWrite to coexist with the active StreamWriter
+            using var fs = new FileStream(_diskPath!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs, Encoding.UTF8);
             string? line;
             while ((line = reader.ReadLine()) != null)
             {
@@ -447,7 +528,9 @@ public sealed class OutputBuffer : IDisposable
         var lineNum = 0;
         try
         {
-            using var reader = new StreamReader(_diskPath!, Encoding.UTF8);
+            // Open with FileShare.ReadWrite to coexist with the active StreamWriter
+            using var fs = new FileStream(_diskPath!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs, Encoding.UTF8);
             string? line;
             while ((line = reader.ReadLine()) != null)
             {

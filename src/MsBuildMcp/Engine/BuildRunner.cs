@@ -333,6 +333,13 @@ public sealed class BuildManager : IDisposable
             }
         }
 
+        // NOTE: There is a deliberate gap here where _lock is not held between the
+        // "is a build running?" check above and the new build creation below. This is
+        // safe because MCP dispatch is single-threaded (McpTransport reads one request
+        // at a time), so two concurrent StartOrPoll calls cannot race through this gap.
+        // If MCP dispatch ever becomes multi-threaded, this section must be restructured
+        // to hold _lock across the entire new-build creation path.
+
         // Start a new build
         var args = BuildArgs(solutionPath, targets, configuration, platform, restore, additionalArgs);
         var psi = CreateProcessStartInfo(toolchain, solutionPath, args);
@@ -409,8 +416,8 @@ public sealed class BuildManager : IDisposable
             if (buildId != null && _currentBuild.BuildId != buildId) return null;
 
             _currentBuild.Cancel();
-            // Give it a moment to exit
-            Thread.Sleep(200);
+            // Wait briefly for the process to exit after Kill — returns early if it does
+            _currentBuild.WaitForNews(200);
             var status = _currentBuild.GetStatus();
             if (!status.IsCompleted)
                 status = status with { Status = "cancelled" };

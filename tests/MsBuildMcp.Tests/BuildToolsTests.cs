@@ -1,6 +1,7 @@
 // Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
+using System.Text;
 using System.Text.Json.Nodes;
 using MsBuildMcp.Engine;
 using MsBuildMcp.Tools;
@@ -391,5 +392,108 @@ public class OutputBufferTests : IDisposable
         var json = BuildTools.StatusToJson(status);
         var error = json["errors"]![0]!;
         Assert.Equal(527, error["output_line"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void OversizedLine_TruncatedInMemory_PreservedOnDisk()
+    {
+        var buf = CreateBuffer();
+        buf.AddLine("normal line 1");
+
+        // Create a line just over the 1MB cap
+        var oversized = new string('X', (int)OutputBuffer.MaxLineLengthBytes + 1000);
+        buf.AddLine(oversized);
+        buf.AddLine("normal line 3");
+
+        Assert.Equal(3, buf.TotalLinesReceived);
+        Assert.True(buf.HasTruncatedLines);
+        Assert.True(buf.HasDiskSpill);
+
+        // Memory version should be truncated with marker
+        var slice = buf.GetLines(1, 3);
+        Assert.Equal(3, slice.Lines.Count);
+        Assert.Equal("normal line 1", slice.Lines[0]);
+        Assert.Contains("LINE TRUNCATED", slice.Lines[1]);
+        Assert.Contains("bytes total", slice.Lines[1]);
+        Assert.Equal("normal line 3", slice.Lines[2]);
+
+        // Memory version should be shorter than the original
+        Assert.True(Encoding.UTF8.GetByteCount(slice.Lines[1]) < oversized.Length);
+
+        // Disk should have the FULL oversized line — verify via search
+        var result = buf.Search("XXXXXX");
+        Assert.True(result.TotalMatches > 0, "Search should find content in oversized line via disk");
+    }
+
+    [Fact]
+    public void OversizedLine_SearchFindsPatternsViaDisk()
+    {
+        var buf = CreateBuffer();
+        buf.AddLine("header line");
+
+        // Build an oversized line with a unique marker buried in the middle
+        var halfSize = (int)OutputBuffer.MaxLineLengthBytes / 2;
+        var oversized = new string('A', halfSize) + "UNIQUE_PATTERN_IN_MIDDLE" + new string('B', halfSize);
+        buf.AddLine(oversized);
+        buf.AddLine("footer line");
+
+        // The unique pattern is past the truncation point in memory,
+        // but should be findable via disk-backed search
+        var result = buf.Search("UNIQUE_PATTERN_IN_MIDDLE");
+        Assert.Equal(1, result.TotalMatches);
+        Assert.Equal(2, result.Matches[0].Line); // line 2 is the oversized line
+
+        // FindFirstMatch should also work via disk
+        var firstMatch = buf.FindFirstMatch("UNIQUE_PATTERN_IN_MIDDLE");
+        Assert.Equal(2, firstMatch);
+    }
+
+    [Fact]
+    public void OversizedLine_MemoryStaysBounded()
+    {
+        var buf = CreateBuffer();
+
+        // Add a line that's 2x the memory cap
+        var huge = new string('Z', (int)OutputBuffer.MaxMemoryBytes * 2);
+        buf.AddLine(huge);
+
+        // The truncated version in memory should be ~1MB, not ~100MB
+        var slice = buf.GetTail(1);
+        Assert.Single(slice.Lines);
+        var memoryLineBytes = Encoding.UTF8.GetByteCount(slice.Lines[0]);
+        Assert.True(memoryLineBytes <= OutputBuffer.MaxLineLengthBytes * 1.1,
+            $"Memory line should be ~1MB but was {memoryLineBytes / 1024 / 1024.0:F1}MB");
+    }
+
+    [Fact]
+    public void TruncateLine_PreservesUtf8CharBoundary()
+    {
+        // Create a string with multi-byte UTF-8 characters
+        var multiByteContent = new string('\u00E9', 500_000); // é = 2 bytes in UTF-8
+        var line = "PREFIX_" + multiByteContent + "_SUFFIX";
+
+        var truncated = OutputBuffer.TruncateLine(line, 100_000);
+        Assert.Contains("LINE TRUNCATED", truncated);
+
+        // Verify the truncated string is valid (no partial multi-byte chars)
+        var bytes = Encoding.UTF8.GetBytes(truncated);
+        var roundTrip = Encoding.UTF8.GetString(bytes);
+        Assert.Equal(truncated, roundTrip);
+    }
+
+    [Fact]
+    public void TailMode_OversizedLine_TruncatedInMemory()
+    {
+        var buf = CreateBuffer("tail");
+        var oversized = new string('Y', (int)OutputBuffer.MaxLineLengthBytes + 5000);
+        buf.AddLine(oversized);
+
+        Assert.True(buf.HasTruncatedLines);
+        // Tail mode has no disk spill — truncation is the only option
+        Assert.False(buf.HasDiskSpill);
+
+        var slice = buf.GetTail(1);
+        Assert.Single(slice.Lines);
+        Assert.Contains("LINE TRUNCATED", slice.Lines[0]);
     }
 }
