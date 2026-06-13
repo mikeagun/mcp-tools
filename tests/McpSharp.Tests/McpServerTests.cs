@@ -218,6 +218,72 @@ public class McpServerTests
     }
 
     [Fact]
+    public void ToolsCall_AuthenticationException_ReturnsStructuredAuthError()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("authtool", _ =>
+            throw new AuthenticationException("GitHub", "Token expired", "Run: gh auth login")));
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "authtool" })!;
+
+        Assert.True(result["isError"]!.GetValue<bool>());
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Contains("AUTHENTICATION FAILED", text);
+        Assert.Contains("GitHub", text);
+        Assert.Contains("Token expired", text);
+        Assert.Contains("STOP", text);
+        Assert.Contains("gh auth login", text);
+    }
+
+    [Fact]
+    public void ToolsCall_AuthenticationException_IncludesRemediation()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("adoauth", _ =>
+            throw new AuthenticationException("ADO", "Auth failed",
+                "1. Run: az login\n2. Set AZURE_DEVOPS_PAT")));
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "adoauth" })!;
+
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Contains("ADO", text);
+        Assert.Contains("az login", text);
+        Assert.Contains("AZURE_DEVOPS_PAT", text);
+        Assert.Contains("do not retry", text);
+    }
+
+    [Fact]
+    public void ToolsCall_AuthException_WithoutElicitation_FallsBackToStopError()
+    {
+        // Server without transport → ClientSupportsElicitation is false → no elicitation
+        var server = CreateServer();
+        var resetCalled = false;
+        server.RegisterTool(CreateTool("authtool", _ =>
+            throw new AuthenticationException("GitHub", "Token expired", "Fix it")
+            { ResetAuth = () => resetCalled = true }));
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "authtool" })!;
+
+        Assert.True(result["isError"]!.GetValue<bool>());
+        Assert.Contains("AUTHENTICATION FAILED", result["content"]!.AsArray()[0]!["text"]!.GetValue<string>());
+        Assert.False(resetCalled); // ResetAuth not called without elicitation
+    }
+
+    [Fact]
+    public void ToolsCall_AuthException_ResetAuthCallbackOnRetry()
+    {
+        // Verify that ResetAuth callback is correctly wired — test the property itself
+        var resetCount = 0;
+        var authEx = new AuthenticationException("ADO", "Auth failed", "Fix it")
+        { ResetAuth = () => resetCount++ };
+
+        authEx.ResetAuth();
+        authEx.ResetAuth();
+
+        Assert.Equal(2, resetCount);
+    }
+
+    [Fact]
     public void ToolsCall_UnknownTool_Throws()
     {
         var server = CreateServer();

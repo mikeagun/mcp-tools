@@ -13,6 +13,7 @@ public static class Program
     {
         var cache = new LogCache();
         var github = new GitHubClient(cache);
+        github.WarmAuth(); // Start auth resolution in background to avoid first-call timeout
         var binaryAnalyzer = new BinaryAnalyzer();
         var downloadManager = new DownloadManager(github);
         var resolver = new CiProviderResolver(github, cache);

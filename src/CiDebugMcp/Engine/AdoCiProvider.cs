@@ -724,6 +724,17 @@ public sealed class AdoCiProvider : ICiProvider
         }
     }
 
+    /// <summary>
+    /// Reset cached auth state so the next API call re-resolves credentials.
+    /// Used after the user re-authenticates via elicitation prompt.
+    /// </summary>
+    internal void ResetAuth()
+    {
+        _authResolved = false;
+        _http.DefaultRequestHeaders.Authorization = null;
+        Console.Error.WriteLine("ci-debug-mcp: ADO auth reset — will re-resolve on next call");
+    }
+
     private AuthResult? ResolveAdoAuth()
     {
         // 1. Explicit PAT
@@ -839,6 +850,14 @@ public sealed class AdoCiProvider : ICiProvider
             if ((int)response.StatusCode == 404)
                 throw new HttpRequestException(
                     $"ADO API returned 404 for {path}. Verify the build/resource exists and you have access.");
+            if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
+                throw new McpSharp.AuthenticationException(
+                    "ADO",
+                    $"ADO API returned {(int)response.StatusCode} — credentials are invalid or expired.",
+                    "1. Run: az login\n" +
+                    "2. Or set the AZURE_DEVOPS_PAT environment variable with a valid Personal Access Token\n" +
+                    "3. Then restart the CLI session")
+                { ResetAuth = ResetAuth };
             GuardHtmlResponse(body);
             response.EnsureSuccessStatusCode();
         }
@@ -850,15 +869,19 @@ public sealed class AdoCiProvider : ICiProvider
     /// <summary>
     /// Detect HTML login pages returned by ADO when auth fails (200 status but HTML body).
     /// </summary>
-    private static void GuardHtmlResponse(string content)
+    private void GuardHtmlResponse(string content)
     {
         if (content.Length > 0 && (content[0] == '<' ||
             content.TrimStart().StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
             content.TrimStart().StartsWith("<html", StringComparison.OrdinalIgnoreCase)))
         {
-            throw new InvalidOperationException(
-                "ADO returned HTML instead of JSON — authentication failed. " +
-                "Ensure Azure CLI is logged in (az login) or set AZURE_DEVOPS_PAT.");
+            throw new McpSharp.AuthenticationException(
+                "ADO",
+                "ADO returned HTML instead of JSON — authentication failed.",
+                "1. Run: az login\n" +
+                "2. Or set the AZURE_DEVOPS_PAT environment variable with a valid Personal Access Token\n" +
+                "3. Then restart the CLI session")
+            { ResetAuth = ResetAuth };
         }
     }
 
