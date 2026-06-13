@@ -151,6 +151,65 @@ public class DownloadJobTests
         Assert.Empty(job.SearchContents([]));
     }
 
+    // ── WaitForNews ───────────────────────────────────────────────
+
+    [Fact]
+    public void WaitForNews_CompletedJob_ReturnsImmediately()
+    {
+        var (job, _) = CreateCompletedJobWithContents(["a.dll"]);
+
+        // Should return immediately, not block for the full timeout
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        job.WaitForNews(5000);
+        sw.Stop();
+
+        Assert.True(sw.ElapsedMilliseconds < 1000,
+            $"WaitForNews on completed job took {sw.ElapsedMilliseconds}ms, expected <1000ms");
+    }
+
+    [Fact]
+    public void WaitForNews_ZeroTimeout_ReturnsImmediately()
+    {
+        var (job, _) = CreateCompletedJobWithContents(["a.dll"]);
+        job.WaitForNews(0); // Should not throw or block
+    }
+
+    [Fact]
+    public void WaitForNews_NegativeTimeout_ReturnsImmediately()
+    {
+        var (job, _) = CreateCompletedJobWithContents(["a.dll"]);
+        job.WaitForNews(-1); // Should not throw or block
+    }
+
+    [Fact]
+    public void WaitForNews_SignalDelivered_ReturnsBeforeTimeout()
+    {
+        // Create a job that will complete quickly via a small in-memory response
+        var tempPath = Path.Combine(Path.GetTempPath(), $"mcptest-{Guid.NewGuid():N}.zip");
+
+        // Create a small ZIP file for the job to download
+        using (var zip = System.IO.Compression.ZipFile.Open(tempPath, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            var e = zip.CreateEntry("test.txt");
+            using var s = e.Open();
+            s.Write("content"u8);
+        }
+
+        var handler = new StaticFileHandler(tempPath);
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+        var job = new DownloadJob(client, "http://localhost/fake.zip", tempPath,
+            "dl-signal-test", 99999, "signal-test");
+
+        // Wait for the download to complete — should be fast since it's in-memory
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        job.WaitForNews(5000);
+        sw.Stop();
+
+        Assert.True(job.IsCompleted, "Job should have completed");
+        Assert.True(sw.ElapsedMilliseconds < 3000,
+            $"WaitForNews took {sw.ElapsedMilliseconds}ms, expected <3000ms for in-memory download");
+    }
+
     // ── Helpers ─────────────────────────────────────────────────
 
     /// <summary>

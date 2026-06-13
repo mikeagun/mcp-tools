@@ -354,6 +354,167 @@ public class LogParserTests
         Assert.True(LogParser.IsInSetupBlock(lines, 0));
     }
 
+    // ── MSVC parenthesized paths ────────────────────────────
+
+    [Fact]
+    public void TryParseError_MsvcWithParenthesizedPath()
+    {
+        // paths like "C:\Program Files (x86)\..." must parse correctly
+        var result = LogParser.TryParseError(
+            @"C:\Program Files (x86)\MSVC\file.cpp(42): error C1234: some message");
+        Assert.NotNull(result);
+        Assert.Equal("msvc", result.Type);
+        Assert.Equal("C1234", result.Code);
+        Assert.Equal(42, result.Line);
+        Assert.Contains(@"Program Files (x86)", result.File!);
+        Assert.Contains("file.cpp", result.File!);
+    }
+
+    [Fact]
+    public void TryParseError_MsvcWithMultipleParens()
+    {
+        // Path with multiple parenthesized segments
+        var result = LogParser.TryParseError(
+            @"C:\Program Files (x86)\Tools (v2)\file.cpp(10,5): error C9999: msg");
+        Assert.NotNull(result);
+        Assert.Equal(10, result.Line);
+        Assert.Contains("Tools (v2)", result.File!);
+    }
+
+    // ── GCC Windows drive letters ─────────────────────────
+
+    [Fact]
+    public void TryParseError_GccWithWindowsDriveLetter()
+    {
+        // Windows drive letter (C:\) must not be parsed as file "C"
+        var result = LogParser.TryParseError(
+            @"C:\src\file.cpp:10:5: error: undeclared identifier 'x'");
+        Assert.NotNull(result);
+        Assert.Equal("gcc", result.Type);
+        Assert.Equal(10, result.Line);
+        Assert.Equal(@"C:\src\file.cpp", result.File!.Trim());
+    }
+
+    [Fact]
+    public void TryParseError_GccWithUnixPath_StillWorks()
+    {
+        // Ensure Unix paths still work after the drive-letter fix
+        var result = LogParser.TryParseError("src/main.c:15:3: error: undeclared identifier 'x'");
+        Assert.NotNull(result);
+        Assert.Equal("gcc", result.Type);
+        Assert.Equal("src/main.c", result.File!.Trim());
+        Assert.Equal(15, result.Line);
+    }
+
+    // ── IsInSetupBlock keyword filtering ──────────────────
+
+    [Fact]
+    public void IsInSetupBlock_BuildGroup_ReturnsFalse()
+    {
+        // lines inside build groups should NOT be treated as setup
+        var lines = new[]
+        {
+            "##[group]Run msbuild /m",
+            "Building project...",
+            "file.cpp(10): error C1234: msg",
+            "##[endgroup]",
+        };
+        Assert.False(LogParser.IsInSetupBlock(lines, 1));
+        Assert.False(LogParser.IsInSetupBlock(lines, 2));
+    }
+
+    [Fact]
+    public void IsInSetupBlock_SetupGroup_ReturnsTrue()
+    {
+        var lines = new[]
+        {
+            "##[group]checkout",
+            "Fetching repository...",
+            "##[endgroup]",
+        };
+        Assert.True(LogParser.IsInSetupBlock(lines, 1));
+    }
+
+    [Fact]
+    public void IsInSetupBlock_CacheGroup_ReturnsTrue()
+    {
+        var lines = new[]
+        {
+            "##[group]Post Cache LLVM",
+            "Saving cache...",
+            "##[endgroup]",
+        };
+        Assert.True(LogParser.IsInSetupBlock(lines, 1));
+    }
+
+    // ── TestFailureRegex word boundary ────────────────────
+
+    [Fact]
+    public void IsMeaningfulError_FailedColon_MatchesMidLine()
+    {
+        // FAILED: not at start of line should still match
+        Assert.True(LogParser.IsMeaningfulError("test output: FAILED: assertion check"));
+    }
+
+    [Fact]
+    public void IsMeaningfulError_XFailed_DoesNotMatch()
+    {
+        // XFAILED should not match (word boundary before FAILED)
+        Assert.False(LogParser.IsMeaningfulError("XFAILED: expected failure"));
+    }
+
+    // ── Case-sensitive error dedup ────────────────────────
+
+    [Fact]
+    public void ExtractMeaningfulErrors_CaseSensitiveDedup()
+    {
+        // On case-sensitive filesystems, File.cpp != file.cpp
+        var lines = BuildStepLines(
+            @"C:\src\File.cpp(10,5): error C2084: body one",
+            @"C:\src\file.cpp(10,5): error C2084: body two");
+        var step = MakeStep(lines, 0, lines.Length - 1);
+
+        var errors = LogParser.ExtractMeaningfulErrors(lines, step, 20);
+        Assert.Equal(2, errors.Count);
+    }
+
+    // ── IsInSetupBlock long groups ────────────────────────
+
+    [Fact]
+    public void IsInSetupBlock_LongGroup_StillDetected()
+    {
+        // groups longer than 50 lines should still be detected
+        var lines = new string[100];
+        lines[0] = "##[group]Set up job";
+        for (int i = 1; i < 99; i++)
+            lines[i] = $"setup line {i}";
+        lines[99] = "##[endgroup]";
+
+        // Line 80 is 80 lines deep — was missed with 50-line lookback
+        Assert.True(LogParser.IsInSetupBlock(lines, 80));
+    }
+
+    [Fact]
+    public void IsInSetupBlock_LongBuildGroup_ReturnsFalse()
+    {
+        // Long build groups should NOT be treated as setup
+        var lines = new string[100];
+        lines[0] = "##[group]Run msbuild /m";
+        for (int i = 1; i < 99; i++)
+            lines[i] = $"build line {i}";
+        lines[99] = "##[endgroup]";
+
+        Assert.False(LogParser.IsInSetupBlock(lines, 80));
+    }
+
+    [Fact]
+    public void IsInSetupBlock_OutsideGroup_NoGroupsInLog()
+    {
+        // Logs with no group markers should return false, not loop forever
+        var lines = Enumerable.Range(0, 600).Select(i => $"line {i}").ToArray();
+        Assert.False(LogParser.IsInSetupBlock(lines, 550));
+    }
+
     // ── StripTimestamp (additional) ─────────────────────────────
 
     [Fact]

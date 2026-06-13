@@ -21,7 +21,6 @@ public sealed class DownloadJob : IDisposable
     public DateTime StartTime { get; } = DateTime.UtcNow;
 
     private readonly Task _downloadTask;
-    private readonly ManualResetEventSlim _newsEvent = new(false);
     private readonly object _lock = new();
 
     // Progress (guarded by _lock)
@@ -32,6 +31,7 @@ public sealed class DownloadJob : IDisposable
     private List<string>? _contents;
     private int _totalFiles;
     private long _uncompressedSize;
+    private int _newsVersion;
 
     public DownloadJob(HttpClient http, string downloadUrl, string destPath,
         string downloadId, long artifactId, string artifactName)
@@ -76,7 +76,7 @@ public sealed class DownloadJob : IDisposable
                 if (current - lastSignal >= ProgressSignalInterval)
                 {
                     lastSignal = current;
-                    _newsEvent.Set();
+                    lock (_lock) { _newsVersion++; Monitor.PulseAll(_lock); }
                 }
             }
 
@@ -84,7 +84,7 @@ public sealed class DownloadJob : IDisposable
             fileStream.Close();
             ParseZipDirectory();
 
-            lock (_lock) { _completed = true; }
+            lock (_lock) { _completed = true; _newsVersion++; Monitor.PulseAll(_lock); }
         }
         catch (Exception ex)
         {
@@ -92,11 +92,9 @@ public sealed class DownloadJob : IDisposable
             {
                 _error = ex.Message;
                 _completed = true;
+                _newsVersion++;
+                Monitor.PulseAll(_lock);
             }
-        }
-        finally
-        {
-            _newsEvent.Set();
         }
     }
 
@@ -136,10 +134,13 @@ public sealed class DownloadJob : IDisposable
         lock (_lock)
         {
             if (_completed) return;
-            _newsEvent.Reset();
+            var observedVersion = _newsVersion;
+            while (!_completed && observedVersion == _newsVersion)
+            {
+                if (!Monitor.Wait(_lock, timeoutMs))
+                    break; // timeout
+            }
         }
-
-        _newsEvent.Wait(timeoutMs);
     }
 
     /// <summary>
@@ -263,7 +264,6 @@ public sealed class DownloadJob : IDisposable
 
     public void Dispose()
     {
-        _newsEvent.Dispose();
         // Don't delete the temp file — DownloadManager handles cleanup
     }
 }

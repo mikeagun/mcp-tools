@@ -13,6 +13,7 @@ public sealed class DownloadManager : IDisposable
 {
     private readonly ConcurrentDictionary<string, DownloadJob> _downloads = new();
     private readonly ConcurrentDictionary<long, string> _artifactToDownloadId = new();
+    private readonly object _startLock = new();
     private readonly IGitHubApi _github;
     private readonly string _cacheDir;
     private int _counter;
@@ -33,26 +34,29 @@ public sealed class DownloadManager : IDisposable
     /// </summary>
     public DownloadJob StartDownload(string owner, string repo, long artifactId, string artifactName)
     {
-        // Dedup: if we already have a download for this artifact, return it
-        if (_artifactToDownloadId.TryGetValue(artifactId, out var existingId) &&
-            _downloads.TryGetValue(existingId, out var existing))
+        lock (_startLock)
         {
-            return existing;
+            // Dedup: if we already have a download for this artifact, return it
+            if (_artifactToDownloadId.TryGetValue(artifactId, out var existingId) &&
+                _downloads.TryGetValue(existingId, out var existing))
+            {
+                return existing;
+            }
+
+            var downloadId = $"dl-{Interlocked.Increment(ref _counter)}";
+            var destPath = Path.Combine(_cacheDir, $"{downloadId}_{artifactId}.zip");
+
+            // Get the download URL (artifact API returns a redirect)
+            var downloadUrl = $"https://api.github.com/repos/{owner}/{repo}/actions/artifacts/{artifactId}/zip";
+
+            var job = new DownloadJob(_github.CreateAuthenticatedClient(), downloadUrl, destPath,
+                downloadId, artifactId, artifactName);
+
+            _downloads[downloadId] = job;
+            _artifactToDownloadId[artifactId] = downloadId;
+
+            return job;
         }
-
-        var downloadId = $"dl-{Interlocked.Increment(ref _counter)}";
-        var destPath = Path.Combine(_cacheDir, $"{downloadId}_{artifactId}.zip");
-
-        // Get the download URL (artifact API returns a redirect)
-        var downloadUrl = $"https://api.github.com/repos/{owner}/{repo}/actions/artifacts/{artifactId}/zip";
-
-        var job = new DownloadJob(_github.CreateAuthenticatedClient(), downloadUrl, destPath,
-            downloadId, artifactId, artifactName);
-
-        _downloads[downloadId] = job;
-        _artifactToDownloadId[artifactId] = downloadId;
-
-        return job;
     }
 
     /// <summary>
@@ -61,22 +65,25 @@ public sealed class DownloadManager : IDisposable
     /// </summary>
     public DownloadJob StartDownload(HttpClient httpClient, string downloadUrl, long artifactId, string artifactName)
     {
-        if (_artifactToDownloadId.TryGetValue(artifactId, out var existingId) &&
-            _downloads.TryGetValue(existingId, out var existing))
+        lock (_startLock)
         {
-            return existing;
+            if (_artifactToDownloadId.TryGetValue(artifactId, out var existingId) &&
+                _downloads.TryGetValue(existingId, out var existing))
+            {
+                return existing;
+            }
+
+            var downloadId = $"dl-{Interlocked.Increment(ref _counter)}";
+            var destPath = Path.Combine(_cacheDir, $"{downloadId}_{artifactId}.zip");
+
+            var job = new DownloadJob(httpClient, downloadUrl, destPath,
+                downloadId, artifactId, artifactName);
+
+            _downloads[downloadId] = job;
+            _artifactToDownloadId[artifactId] = downloadId;
+
+            return job;
         }
-
-        var downloadId = $"dl-{Interlocked.Increment(ref _counter)}";
-        var destPath = Path.Combine(_cacheDir, $"{downloadId}_{artifactId}.zip");
-
-        var job = new DownloadJob(httpClient, downloadUrl, destPath,
-            downloadId, artifactId, artifactName);
-
-        _downloads[downloadId] = job;
-        _artifactToDownloadId[artifactId] = downloadId;
-
-        return job;
     }
 
     /// <summary>
@@ -116,18 +123,21 @@ public sealed class DownloadManager : IDisposable
         {
             if (job.IsCompleted && (now - job.StartTime) > CompletedTtl)
             {
-                if (_downloads.TryRemove(id, out var removed))
+                DownloadJob? removed;
+                lock (_startLock)
                 {
+                    if (!_downloads.TryRemove(id, out removed))
+                        continue;
                     _artifactToDownloadId.TryRemove(removed.ArtifactId, out _);
-
-                    // Clean up files
-                    try { File.Delete(removed.DestPath); } catch { }
-                    var extractDir = Path.Combine(_cacheDir, id);
-                    try { if (Directory.Exists(extractDir)) Directory.Delete(extractDir, true); } catch { }
-
-                    removed.Dispose();
-                    Console.Error.WriteLine($"ci-debug-mcp: cleaned up download {id}");
                 }
+
+                // File cleanup and dispose outside the lock
+                try { File.Delete(removed.DestPath); } catch { }
+                var extractDir = Path.Combine(_cacheDir, id);
+                try { if (Directory.Exists(extractDir)) Directory.Delete(extractDir, true); } catch { }
+
+                removed.Dispose();
+                Console.Error.WriteLine($"ci-debug-mcp: cleaned up download {id}");
             }
         }
     }

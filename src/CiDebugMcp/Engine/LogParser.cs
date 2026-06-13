@@ -115,16 +115,22 @@ public static partial class LogParser
         var cleaned = MsbuildPrefixRegex().Replace(line, "").TrimStart();
 
         // MSVC: "file(line,col): error C1234: message"
-        var msvc = MsvcErrorRegex().Match(cleaned);
-        if (msvc.Success)
+        // Use a right-to-left scan to handle parentheses in paths like
+        // "C:\Program Files (x86)\file.cpp(42): error C1234: msg".
+        // The regex uses [^(]+ which stops at the first '(' — correct for
+        // simple paths but wrong when the path contains '('. Post-process
+        // via MsvcSuffixRegex to find the rightmost (digits): error match.
+        var msvcSuffix = MsvcSuffixRegex().Match(cleaned);
+        if (msvcSuffix.Success)
         {
+            var file = cleaned[..msvcSuffix.Index].Trim();
             return new ParsedError
             {
                 Type = "msvc",
-                Code = msvc.Groups["code"].Value,
-                Message = msvc.Groups["msg"].Value,
-                File = msvc.Groups["file"].Value.Trim(),
-                Line = int.TryParse(msvc.Groups["line"].Value, out var l) ? l : null,
+                Code = msvcSuffix.Groups["code"].Value,
+                Message = msvcSuffix.Groups["msg"].Value,
+                File = file,
+                Line = int.TryParse(msvcSuffix.Groups["line"].Value, out var l) ? l : null,
             };
         }
 
@@ -299,7 +305,9 @@ public static partial class LogParser
 
         // Deduplicate: by parsed error key (code+file+line) for structured errors,
         // exact string match for unstructured lines. Preserves order.
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Use case-sensitive comparison — on case-sensitive filesystems,
+        // File.cpp and file.cpp are different files.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         var deduped = new List<string>();
         foreach (var err in errors)
         {
@@ -360,12 +368,18 @@ public static partial class LogParser
         if (SetupBoilerplate.Any(b => stripped.Contains(b, StringComparison.OrdinalIgnoreCase)))
             return true;
 
-        // Check if inside a ##[group]...##[endgroup] block
-        for (int i = lineIndex; i >= Math.Max(0, lineIndex - 50); i--)
+        // Check if inside a ##[group]...##[endgroup] block.
+        // Scan backward up to 500 lines — covers any realistic CI group.
+        for (int i = lineIndex; i >= Math.Max(0, lineIndex - 500); i--)
         {
             var s = StripTimestamp(lines[i]);
             if (s == GroupEnd) return false;
-            if (s.StartsWith(GroupStart)) return true;
+            if (s.StartsWith(GroupStart))
+            {
+                // Only treat groups with setup-related names as setup blocks
+                var groupName = s[GroupStart.Length..];
+                return IsSetupStep(groupName);
+            }
         }
         return false;
     }
@@ -605,13 +619,18 @@ public static partial class LogParser
     [GeneratedRegex(@"(?<file>[^(]+)\((?<line>\d+)(?:,\d+)?\)\s*:\s*error\s+(?<code>\w+)\s*:\s*(?<msg>.+)")]
     private static partial Regex MsvcErrorRegex();
 
-    [GeneratedRegex(@"(?<file>[^:]+):(?<line>\d+):\d+:\s*error:\s*(?<msg>.+)")]
+    // Right-to-left scan for the (line,col): error suffix — finds the rightmost
+    // match, so parentheses in paths like "Program Files (x86)" are not consumed.
+    [GeneratedRegex(@"\((?<line>\d+)(?:,\d+)?\)\s*:\s*error\s+(?<code>\w+)\s*:\s*(?<msg>.+)", RegexOptions.RightToLeft)]
+    private static partial Regex MsvcSuffixRegex();
+
+    [GeneratedRegex(@"(?<file>(?:[A-Za-z]:)?[^:]+):(?<line>\d+):\d+:\s*error:\s*(?<msg>.+)")]
     private static partial Regex GccErrorRegex();
 
     [GeneratedRegex(@"error\s+LNK\d+", RegexOptions.IgnoreCase)]
     private static partial Regex MsvcLinkerErrorRegex();
 
-    [GeneratedRegex(@"\b(FAILED:|CRASHED|Assertion failed|Mismatch found)\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\bFAILED:|\b(?:CRASHED|Assertion failed|Mismatch found)\b", RegexOptions.IgnoreCase)]
     private static partial Regex TestFailureRegex();
 
     [GeneratedRegex(@"\b(Exception|not found|permission denied|access denied)\b", RegexOptions.IgnoreCase)]

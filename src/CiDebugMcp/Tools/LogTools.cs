@@ -1051,23 +1051,8 @@ public static partial class LogTools
                     stepsToScan.Add(s);
             }
 
-            // Priority 3: longest non-setup steps (likely build/test steps)
-            // Only if we still have no scan targets
-            if (stepsToScan.Count == 0)
-            {
-                var longSteps = log.Steps
-                    .Where(s => (s.EndLine - s.StartLine) > 50)
-                    .Where(s => !LogParser.IsSetupStep(s.Name))
-                    .OrderByDescending(s => s.EndLine - s.StartLine)
-                    .Take(3);
-                foreach (var s in longSteps)
-                {
-                    if (scannedNumbers.Add(s.Number))
-                        stepsToScan.Add(s);
-                }
-            }
-
-            // Extract errors from log
+            // Extract errors from log — scan priority steps first, then fall through
+            // to long non-setup steps if priority steps yielded no meaningful errors.
             var stepsArr = new JsonArray();
             var allRawErrors = new List<string>();
             ParsedStep? primaryStep = null;
@@ -1126,6 +1111,72 @@ public static partial class LogTools
                 }
 
                 stepsArr.Add(stepObj);
+            }
+
+            // Priority 3: if priority steps yielded no errors, fall through
+            // to longest non-setup steps (likely build/test steps with real errors).
+            if (stepsArr.Count == 0)
+            {
+                var longSteps = log.Steps
+                    .Where(s => (s.EndLine - s.StartLine) > 50)
+                    .Where(s => !LogParser.IsSetupStep(s.Name))
+                    .OrderByDescending(s => s.EndLine - s.StartLine)
+                    .Take(3);
+                foreach (var longStep in longSteps)
+                {
+                    if (budget.Remaining <= 0) break;
+                    if (!scannedNumbers.Add(longStep.Number)) continue;
+
+                    var meaningfulErrors = LogParser.ExtractMeaningfulErrors(log.Lines, longStep, budget.Remaining);
+                    if (meaningfulErrors.Count == 0) continue;
+
+                    primaryStep ??= longStep;
+
+                    var stepObj = new JsonObject
+                    {
+                        ["number"] = longStep.Number,
+                        ["name"] = longStep.Name,
+                    };
+
+                    var errorsArr = new JsonArray();
+                    foreach (var err in meaningfulErrors)
+                    {
+                        if (budget.Remaining <= 0) break;
+
+                        allRawErrors.Add(err);
+                        var parsed = LogParser.TryParseError(err);
+                        if (parsed != null)
+                        {
+                            errorsArr.Add(new JsonObject
+                            {
+                                ["raw"] = err,
+                                ["code"] = parsed.Code,
+                                ["message"] = parsed.Message,
+                                ["file"] = parsed.File,
+                                ["source_line"] = parsed.Line,
+                            });
+                        }
+                        else
+                        {
+                            errorsArr.Add(err);
+                        }
+                        budget.Remaining--;
+                    }
+                    stepObj["errors"] = errorsArr;
+                    if (meaningfulErrors.Count > errorsArr.Count)
+                        stepObj["total_errors"] = meaningfulErrors.Count;
+
+                    var testNames = LogParser.ExtractFailedTestNames(log.Lines, longStep);
+                    if (testNames.Count > 0)
+                    {
+                        stepObj["failed_test_names"] = new JsonArray(
+                            testNames.Take(maxTestNames).Select(n => (JsonNode)JsonValue.Create(n)!).ToArray());
+                        if (testNames.Count > maxTestNames)
+                            stepObj["failed_test_names_total"] = testNames.Count;
+                    }
+
+                    stepsArr.Add(stepObj);
+                }
             }
 
             if (stepsArr.Count > 0)
