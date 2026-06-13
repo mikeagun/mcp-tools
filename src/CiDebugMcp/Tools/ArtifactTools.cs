@@ -573,8 +573,10 @@ public static class ArtifactTools
         if (!long.TryParse(target.Id, out var artifactId))
             artifactId = target.Name.GetHashCode(); // fallback dedup key
 
-        var httpClient = provider.CreateDownloadClient();
-        var job = dm.StartDownload(httpClient, target.DownloadUrl, artifactId, target.Name);
+        // Pass the factory (method group) so DownloadManager invokes it only
+        // on cache-miss; repeat callers within the cache TTL reuse the
+        // existing job without allocating a new client.
+        var job = dm.StartDownload(provider.CreateDownloadClient, target.DownloadUrl, artifactId, target.Name);
 
         if (timeout > 0)
         {

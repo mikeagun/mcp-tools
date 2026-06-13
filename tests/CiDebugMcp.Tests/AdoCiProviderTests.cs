@@ -338,7 +338,7 @@ public class AdoCiProviderTests
         var handler = new HttpClientHandler();
         var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
 
-        var job = dm.StartDownload(client, "https://example.com/artifact.zip", 99999, "test-artifact");
+        var job = dm.StartDownload(() => client, "https://example.com/artifact.zip", 99999, "test-artifact");
 
         Assert.NotNull(job);
         Assert.Equal("test-artifact", job.ArtifactName);
@@ -354,10 +354,101 @@ public class AdoCiProviderTests
         var client1 = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         var client2 = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
-        var job1 = dm.StartDownload(client1, "https://example.com/artifact.zip", 12345, "artifact-a");
-        var job2 = dm.StartDownload(client2, "https://example.com/artifact.zip", 12345, "artifact-a");
+        var job1 = dm.StartDownload(() => client1, "https://example.com/artifact.zip", 12345, "artifact-a");
+        var job2 = dm.StartDownload(() => client2, "https://example.com/artifact.zip", 12345, "artifact-a");
 
         Assert.Same(job1, job2);
+    }
+
+    /// <summary>
+    /// Adversarial regression: when <c>StartDownload</c> dedup-hits, the
+    /// client factory MUST NOT be invoked. Invoking it eagerly (before the
+    /// cache check, or unconditionally inside both branches) would allocate
+    /// an <see cref="HttpClient"/> that gets dropped on the floor when the
+    /// dedup branch returns the existing job — a resource leak that grows
+    /// with every repeat call during the 1-hour cache TTL.
+    ///
+    /// The factory is invoked only on cache-miss; the GitHub overload uses
+    /// the same lazy pattern via <c>_github.CreateAuthenticatedClient()</c>.
+    /// </summary>
+    [Fact]
+    public void DownloadManager_StartDownload_WithDirectUrl_DedupHit_DoesNotInvokeFactory()
+    {
+        var fakeApi = new FakeGitHubApi();
+        using var dm = new DownloadManager(fakeApi);
+
+        var factoryInvocations = 0;
+        HttpClient Factory()
+        {
+            Interlocked.Increment(ref factoryInvocations);
+            return new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        }
+
+        // First call: cache miss → factory invoked once.
+        var job1 = dm.StartDownload(Factory, "https://example.com/artifact.zip", 54321, "artifact-x");
+        Assert.Equal(1, factoryInvocations);
+
+        // Second call with same artifactId: cache hit → factory MUST NOT be invoked.
+        var job2 = dm.StartDownload(Factory, "https://example.com/artifact.zip", 54321, "artifact-x");
+        Assert.Same(job1, job2);
+        Assert.Equal(1, factoryInvocations);
+
+        // Third call with different artifactId: cache miss → factory invoked once more.
+        var job3 = dm.StartDownload(Factory, "https://example.com/other.zip", 54322, "artifact-y");
+        Assert.NotSame(job1, job3);
+        Assert.Equal(2, factoryInvocations);
+    }
+
+    /// <summary>
+    /// Regression: <see cref="DownloadJob.Dispose"/> must dispose the
+    /// <see cref="HttpClient"/> it owns so the underlying socket /
+    /// connection pool is released deterministically. Without this, even
+    /// non-deduped downloads would only release their network resources
+    /// when GC ran the HttpClient finalizer — an indeterminate lag that
+    /// matters under sustained download activity.
+    ///
+    /// The test uses a custom <see cref="HttpMessageHandler"/> that records
+    /// whether <c>Dispose</c> was called; disposing the manager (which
+    /// disposes each contained job) must propagate to the handler.
+    /// </summary>
+    [Fact]
+    public void DownloadJob_Dispose_DisposesHttpClient()
+    {
+        var fakeApi = new FakeGitHubApi();
+        var dm = new DownloadManager(fakeApi);
+
+        DisposeTrackingHandler? trackedHandler = null;
+        var job = dm.StartDownload(() =>
+        {
+            trackedHandler = new DisposeTrackingHandler();
+            return new HttpClient(trackedHandler) { Timeout = TimeSpan.FromSeconds(5) };
+        }, "https://example.com/artifact.zip", 71717, "dispose-test");
+
+        Assert.NotNull(trackedHandler);
+        Assert.False(trackedHandler.WasDisposed, "Handler should not be disposed before manager dispose");
+
+        dm.Dispose();
+
+        Assert.True(trackedHandler.WasDisposed,
+            "Disposing the manager must propagate through DownloadJob.Dispose to dispose the HttpClient and its handler");
+    }
+
+    private sealed class DisposeTrackingHandler : HttpMessageHandler
+    {
+        public bool WasDisposed { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            // Return 404 so the download fails fast — we only care about lifecycle here.
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) WasDisposed = true;
+            base.Dispose(disposing);
+        }
     }
 
     // ── ADO Log Parsing ─────────────────────────────────────────

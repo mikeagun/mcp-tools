@@ -21,6 +21,7 @@ public sealed class DownloadJob : IDisposable
     public DateTime StartTime { get; } = DateTime.UtcNow;
 
     private readonly Task _downloadTask;
+    private readonly HttpClient _http;
     private readonly object _lock = new();
 
     // Progress (guarded by _lock)
@@ -40,7 +41,8 @@ public sealed class DownloadJob : IDisposable
         ArtifactId = artifactId;
         ArtifactName = artifactName;
         DestPath = destPath;
-        _downloadTask = Task.Run(() => DownloadAsync(http, downloadUrl));
+        _http = http;
+        _downloadTask = Task.Run(() => DownloadAsync(downloadUrl));
     }
 
     /// <summary>
@@ -63,6 +65,10 @@ public sealed class DownloadJob : IDisposable
         ArtifactId = artifactId;
         ArtifactName = artifactName;
         DestPath = destPath;
+        // No HttpClient — this ctor bypasses the download loop entirely.
+        // Dispose() null-checks _http so a never-downloaded job is safely
+        // disposable without a client.
+        _http = null!;
         _downloadTask = Task.CompletedTask;
         // Populate ZIP metadata (_contents, _totalFiles, _uncompressedSize)
         // exactly as the real download path does after streaming the file
@@ -79,11 +85,11 @@ public sealed class DownloadJob : IDisposable
         _completed = true;
     }
 
-    private async Task DownloadAsync(HttpClient http, string url)
+    private async Task DownloadAsync(string url)
     {
         try
         {
-            using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();
 
             lock (_lock)
@@ -300,7 +306,13 @@ public sealed class DownloadJob : IDisposable
 
     public void Dispose()
     {
-        // Don't delete the temp file — DownloadManager handles cleanup
+        // Don't delete the temp file — DownloadManager handles cleanup.
+        // Dispose the HttpClient so the underlying socket / connection pool
+        // is released deterministically rather than waiting for GC to run
+        // the HttpClient finalizer. The internal test-only ctor leaves
+        // _http null because it bypasses the download path entirely, so
+        // null-check before dispose.
+        _http?.Dispose();
     }
 }
 
