@@ -286,6 +286,67 @@ public class AdoCiProviderTests
         Assert.Null(json["cancelled"]);
     }
 
+    // ── CiArtifact.DownloadUrl ──────────────────────────────────
+
+    [Fact]
+    public void CiArtifact_DownloadUrl_OptionalProperty()
+    {
+        var artifact = new CiArtifact
+        {
+            Id = "123",
+            Name = "test-artifact",
+            SizeBytes = 1024,
+            DownloadUrl = "https://artifacts.example.com/download/123.zip",
+        };
+
+        Assert.Equal("https://artifacts.example.com/download/123.zip", artifact.DownloadUrl);
+    }
+
+    [Fact]
+    public void CiArtifact_DownloadUrl_NullWhenNotSet()
+    {
+        var artifact = new CiArtifact
+        {
+            Id = "123",
+            Name = "test-artifact",
+        };
+
+        Assert.Null(artifact.DownloadUrl);
+    }
+
+    // ── DownloadManager URL Overload ────────────────────────────
+
+    [Fact]
+    public void DownloadManager_StartDownload_WithDirectUrl_ReturnsJob()
+    {
+        var fakeApi = new FakeGitHubApi();
+        using var dm = new DownloadManager(fakeApi);
+
+        var handler = new HttpClientHandler();
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+
+        var job = dm.StartDownload(client, "https://example.com/artifact.zip", 99999, "test-artifact");
+
+        Assert.NotNull(job);
+        Assert.Equal("test-artifact", job.ArtifactName);
+        Assert.Equal(99999, job.ArtifactId);
+    }
+
+    [Fact]
+    public void DownloadManager_StartDownload_WithDirectUrl_DedupsSameArtifact()
+    {
+        var fakeApi = new FakeGitHubApi();
+        using var dm = new DownloadManager(fakeApi);
+
+        var client1 = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var client2 = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+
+        var job1 = dm.StartDownload(client1, "https://example.com/artifact.zip", 12345, "artifact-a");
+        var job2 = dm.StartDownload(client2, "https://example.com/artifact.zip", 12345, "artifact-a");
+
+        Assert.Same(job1, job2);
+    }
+
     // ── ADO Log Parsing ─────────────────────────────────────────
 
     [Fact]

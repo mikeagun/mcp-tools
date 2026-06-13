@@ -21,7 +21,7 @@ public static class ArtifactTools
             Name = "download_artifact",
             Description = "CI build artifact operations (GitHub Actions / Azure Pipelines). " +
                           "GitHub: full download/extract pipeline with background downloads. " +
-                          "ADO: artifact listing only (provide url param with ADO build URL). " +
+                          "ADO: full download/extract pipeline with background downloads (same as GitHub). " +
                           "Modes: list_only=true → list artifacts; run_id or artifact_id → start download; " +
                           "download_id → poll/extract existing; list_downloads=true → all active downloads. " +
                           "Returns: { download_id, status ('queued'|'downloading'|'completed'|'failed'), " +
@@ -128,16 +128,18 @@ public static class ArtifactTools
                         var nameFilter2 = args["name_filter"]?.GetValue<string>();
                         var listOnly2 = args["list_only"]?.GetValue<bool>() ?? false;
 
-                        if (buildId != null && listOnly2)
+                        if (buildId == null)
+                            throw new ArgumentException("ADO requires a buildId — provide url with ?buildId=N or run_id param");
+
+                        if (listOnly2)
                         {
                             return ListAdoArtifactsAsync(resolved.Provider, buildId, nameFilter2)
                                 .GetAwaiter().GetResult();
                         }
 
-                        if (buildId == null)
-                            throw new ArgumentException("ADO requires a buildId — provide url with ?buildId=N or run_id param");
-
-                        return ListAdoArtifactsAsync(resolved.Provider, buildId, nameFilter2)
+                        // ADO download path — list artifacts, find match, start download
+                        return StartAdoDownloadAsync(resolved.Provider, downloadManager, buildId, nameFilter2,
+                            args["timeout"]?.GetValue<int>() ?? 30, args)
                             .GetAwaiter().GetResult();
                     }
                 }
@@ -529,5 +531,69 @@ public static class ArtifactTools
             result["note"] = "ADO does not report artifact sizes in list responses";
 
         return result;
+    }
+
+    private static async Task<JsonNode> StartAdoDownloadAsync(
+        ICiProvider provider, DownloadManager dm, string buildId, string? nameFilter,
+        int timeout, JsonObject args)
+    {
+        var artifacts = await provider.ListArtifactsAsync(buildId);
+
+        // Find the target artifact (first match for nameFilter, or first if no filter)
+        CiArtifact? target = null;
+        foreach (var a in artifacts)
+        {
+            if (nameFilter == null || a.Name.Contains(nameFilter, StringComparison.OrdinalIgnoreCase))
+            {
+                target = a;
+                break;
+            }
+        }
+
+        if (target == null)
+        {
+            return new JsonObject
+            {
+                ["error"] = $"No artifact found" + (nameFilter != null ? $" matching '{nameFilter}'" : ""),
+                ["available"] = new JsonArray(artifacts.Select(a =>
+                    (JsonNode)JsonValue.Create(a.Name)!).ToArray()),
+            };
+        }
+
+        if (string.IsNullOrEmpty(target.DownloadUrl))
+        {
+            return new JsonObject
+            {
+                ["error"] = $"Artifact '{target.Name}' has no download URL — the ADO API did not return a resource.downloadUrl",
+                ["artifact"] = new JsonObject { ["id"] = target.Id, ["name"] = target.Name },
+            };
+        }
+
+        // Parse artifact ID as long for DownloadManager dedup
+        if (!long.TryParse(target.Id, out var artifactId))
+            artifactId = target.Name.GetHashCode(); // fallback dedup key
+
+        var httpClient = provider.CreateDownloadClient();
+        var job = dm.StartDownload(httpClient, target.DownloadUrl, artifactId, target.Name);
+
+        if (timeout > 0)
+        {
+            job.WaitForNews(timeout * 1000);
+        }
+
+        var status = job.GetStatus(includeContents: true, maxContents: 30);
+
+        // If completed and extract was requested, do it
+        var extractPatterns = args["extract"]?.AsArray()
+            ?.Select(n => n!.GetValue<string>()).ToArray();
+
+        if (extractPatterns != null && extractPatterns.Length > 0 && status.IsCompleted && status.Error == null)
+        {
+            var extractDir = dm.GetExtractDir(job.DownloadId);
+            var extracted = job.Extract(extractPatterns, extractDir);
+            return BuildExtractResponse(job.DownloadId, extracted);
+        }
+
+        return BuildStatusResponse(status);
     }
 }

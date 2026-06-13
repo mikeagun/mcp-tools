@@ -56,6 +56,30 @@ public sealed class DownloadManager : IDisposable
     }
 
     /// <summary>
+    /// Start a download from a direct URL with a pre-authenticated client.
+    /// Used for ADO artifacts where the download URL is known from the listing.
+    /// </summary>
+    public DownloadJob StartDownload(HttpClient httpClient, string downloadUrl, long artifactId, string artifactName)
+    {
+        if (_artifactToDownloadId.TryGetValue(artifactId, out var existingId) &&
+            _downloads.TryGetValue(existingId, out var existing))
+        {
+            return existing;
+        }
+
+        var downloadId = $"dl-{Interlocked.Increment(ref _counter)}";
+        var destPath = Path.Combine(_cacheDir, $"{downloadId}_{artifactId}.zip");
+
+        var job = new DownloadJob(httpClient, downloadUrl, destPath,
+            downloadId, artifactId, artifactName);
+
+        _downloads[downloadId] = job;
+        _artifactToDownloadId[artifactId] = downloadId;
+
+        return job;
+    }
+
+    /// <summary>
     /// Get an existing download by ID.
     /// </summary>
     public DownloadJob? GetDownload(string downloadId)
