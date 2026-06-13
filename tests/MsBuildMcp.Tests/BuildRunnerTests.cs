@@ -136,4 +136,139 @@ public class BuildRunnerTests
 
         Assert.DoesNotContain("", args);
     }
+
+    // --- Concurrency invariant ---
+
+    /// <summary>
+    /// Adversarial regression test for the StartOrPoll race window.
+    ///
+    /// StartOrPoll holds <c>_lock</c> while checking whether a build is
+    /// already running. The fix this test pins ensures the lock is also
+    /// held across the new-build construction path — otherwise two
+    /// concurrent callers could both observe "no running build" and both
+    /// proceed to construct separate <see cref="BuildJob"/> instances,
+    /// double-spawning MSBuild processes. When the second assignment to
+    /// <c>_currentBuild</c> overwrites the first, the loser is disposed
+    /// (killing its process tree), but only after the redundant launch.
+    ///
+    /// The test fires N threads at the same fresh manager and asserts that
+    /// exactly one BuildJob was created. Reverting the lock-extension makes
+    /// this assertion fail (counter rises with the number of concurrent
+    /// callers that won the race; reverted measurement: Actual=6/6).
+    ///
+    /// Implementation notes:
+    /// - A <see cref="Barrier"/> aligns thread entry into StartOrPoll so the
+    ///   race window is open simultaneously for all callers. With the fix in
+    ///   place, the first thread acquires the lock, runs Process.Start, and
+    ///   assigns _currentBuild before subsequent threads enter the check —
+    ///   so the in-flight branch fires for callers 2..N.
+    /// - We use a non-existent .sln path so MSBuild fails fast; this bounds
+    ///   wall time. The build process lifecycle is real, but MSBuild start +
+    ///   load + parse + error takes longer than Process.Start + lock release,
+    ///   so the in-flight branch reliably fires.
+    /// </summary>
+    [Fact]
+    public async Task StartOrPoll_ConcurrentCalls_DoNotDoubleCreateBuild()
+    {
+        using var manager = new BuildManager();
+        var bogusSln = Path.Combine(Path.GetTempPath(), $"bogus-{Guid.NewGuid():N}.sln");
+        const int callers = 6;
+
+        using var startBarrier = new Barrier(callers);
+        var tasks = Enumerable.Range(0, callers).Select(_ => Task.Run(() =>
+        {
+            startBarrier.SignalAndWait();
+            try
+            {
+                manager.StartOrPoll(bogusSln, targets: null,
+                    configuration: "Debug", platform: "x64",
+                    restore: false, additionalArgs: null,
+                    timeoutSeconds: 2);
+            }
+            catch
+            {
+                // MSBuild fails fast on a bogus sln; the StartOrPoll call
+                // either returns a failed BuildStatus or throws. Either is
+                // acceptable for the invariant we care about.
+            }
+        })).ToArray();
+
+        await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(60));
+
+        // The invariant: only ONE BuildJob was created. Without the lock
+        // extension, this is observed to be in {2..callers}.
+        Assert.Equal(1, manager.BuildCounter);
+    }
+
+    /// <summary>
+    /// Sibling test for StartPublish — same race pattern, same lock invariant.
+    /// Without the StartPublish lock-extension, multiple concurrent callers
+    /// double-spawn `dotnet publish` subprocesses.
+    /// </summary>
+    [Fact]
+    public async Task StartPublish_ConcurrentCalls_DoNotDoubleCreateBuild()
+    {
+        using var manager = new BuildManager();
+        var bogusProj = Path.Combine(Path.GetTempPath(), $"bogus-{Guid.NewGuid():N}.csproj");
+        const int callers = 6;
+
+        using var startBarrier = new Barrier(callers);
+        var tasks = Enumerable.Range(0, callers).Select(_ => Task.Run(() =>
+        {
+            startBarrier.SignalAndWait();
+            try
+            {
+                manager.StartPublish(bogusProj, configuration: "Debug",
+                    runtime: null, framework: null, output: null,
+                    selfContained: null, additionalArgs: null,
+                    timeoutSeconds: 2);
+            }
+            catch { /* dotnet publish fails fast on a bogus csproj */ }
+        })).ToArray();
+
+        await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.Equal(1, manager.BuildCounter);
+    }
+
+    /// <summary>
+    /// Cross-method test: StartOrPoll and StartPublish share <c>_currentBuild</c>.
+    /// A concurrent build + publish must not both observe "no running build"
+    /// and double-spawn. This pins the cross-method invariant.
+    /// </summary>
+    [Fact]
+    public async Task StartOrPoll_And_StartPublish_Concurrent_DoNotDoubleCreateBuild()
+    {
+        using var manager = new BuildManager();
+        var bogusSln = Path.Combine(Path.GetTempPath(), $"bogus-{Guid.NewGuid():N}.sln");
+        var bogusProj = Path.Combine(Path.GetTempPath(), $"bogus-{Guid.NewGuid():N}.csproj");
+
+        using var startBarrier = new Barrier(2);
+        var t1 = Task.Run(() =>
+        {
+            startBarrier.SignalAndWait();
+            try
+            {
+                manager.StartOrPoll(bogusSln, targets: null,
+                    configuration: "Debug", platform: "x64",
+                    restore: false, additionalArgs: null,
+                    timeoutSeconds: 2);
+            }
+            catch { }
+        });
+        var t2 = Task.Run(() =>
+        {
+            startBarrier.SignalAndWait();
+            try
+            {
+                manager.StartPublish(bogusProj, configuration: "Debug",
+                    runtime: null, framework: null, output: null,
+                    selfContained: null, additionalArgs: null,
+                    timeoutSeconds: 2);
+            }
+            catch { }
+        });
+
+        await Task.WhenAll(t1, t2).WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.Equal(1, manager.BuildCounter);
+    }
 }

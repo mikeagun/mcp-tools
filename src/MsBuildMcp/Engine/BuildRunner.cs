@@ -275,6 +275,16 @@ public sealed class BuildManager : IDisposable
     private int _buildCounter;
 
     /// <summary>
+    /// Number of <see cref="BuildJob"/> instances created by this manager so
+    /// far. Exposed for thread-safety tests that need to verify concurrent
+    /// callers do not race past the running-build check and double-create.
+    /// </summary>
+    internal int BuildCounter
+    {
+        get { lock (_lock) return _buildCounter; }
+    }
+
+    /// <summary>
     /// Start a new build or return the current running build's status.
     /// Waits up to timeoutSeconds for the build to complete or for new errors.
     /// </summary>
@@ -292,6 +302,7 @@ public sealed class BuildManager : IDisposable
         var toolchain = _toolchain.Value;
         var normalizedSln = Path.GetFullPath(solutionPath);
 
+        BuildJob newJob;
         lock (_lock)
         {
             if (_currentBuild != null && !_currentBuild.IsCompleted)
@@ -331,25 +342,24 @@ public sealed class BuildManager : IDisposable
                 ArchiveIfCompletedLocked();
                 return status;
             }
-        }
 
-        // NOTE: There is a deliberate gap here where _lock is not held between the
-        // "is a build running?" check above and the new build creation below. This is
-        // safe because MCP dispatch is single-threaded (McpTransport reads one request
-        // at a time), so two concurrent StartOrPoll calls cannot race through this gap.
-        // If MCP dispatch ever becomes multi-threaded, this section must be restructured
-        // to hold _lock across the entire new-build creation path.
+            // Hold _lock across BuildJob construction so two callers cannot
+            // both observe "no running build" and both proceed to start one.
+            // This invariant must not depend on the caller being single-threaded:
+            // although Program.cs invokes transport.Run(handler) with the default
+            // concurrent: false today, McpTransport.Run(..., concurrent: true)
+            // dispatches via ThreadPool.QueueUserWorkItem and is a public option.
+            // BuildJob's ctor allocates a Process and starts a reader Task, but
+            // does not reenter this lock (it operates on its own private _lock),
+            // and BuildArgs/CreateProcessStartInfo are pure static helpers — so
+            // holding the lock here is safe and inexpensive relative to the
+            // build's own runtime.
+            var args = BuildArgs(solutionPath, targets, configuration, platform, restore, additionalArgs);
+            var psi = CreateProcessStartInfo(toolchain, solutionPath, args);
+            var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";
+            var command = $"{toolchain.MsBuildPath} {string.Join(" ", args)}";
 
-        // Start a new build
-        var args = BuildArgs(solutionPath, targets, configuration, platform, restore, additionalArgs);
-        var psi = CreateProcessStartInfo(toolchain, solutionPath, args);
-        var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";
-        var command = $"{toolchain.MsBuildPath} {string.Join(" ", args)}";
-
-        var newJob = new BuildJob(psi, buildId, command, normalizedSln, targets, retention);
-
-        lock (_lock)
-        {
+            newJob = new BuildJob(psi, buildId, command, normalizedSln, targets, retention);
             _currentBuild?.Dispose();
             _currentBuild = newJob;
         }
@@ -509,6 +519,7 @@ public sealed class BuildManager : IDisposable
     {
         var normalizedPath = Path.GetFullPath(projectPath);
 
+        BuildJob newJob;
         lock (_lock)
         {
             if (_currentBuild != null && !_currentBuild.IsCompleted)
@@ -539,20 +550,20 @@ public sealed class BuildManager : IDisposable
                 ArchiveIfCompletedLocked();
                 return status;
             }
-        }
 
-        // Same single-threaded MCP dispatch safety note as StartOrPoll applies here.
+            // Hold _lock across BuildJob construction — same invariant as
+            // StartOrPoll. Two concurrent StartPublish callers (or one
+            // StartPublish + one StartOrPoll) must not both observe "no
+            // running build" and double-spawn. See StartOrPoll's matching
+            // comment for the call-site / lock-ordering / reentrancy
+            // reasoning that applies identically here.
+            var args = PublishArgs(projectPath, configuration, runtime, framework,
+                output, selfContained, additionalArgs);
+            var psi = CreatePublishProcessStartInfo(projectPath, args);
+            var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";
+            var command = $"dotnet {string.Join(" ", args)}";
 
-        var args = PublishArgs(projectPath, configuration, runtime, framework,
-            output, selfContained, additionalArgs);
-        var psi = CreatePublishProcessStartInfo(projectPath, args);
-        var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";
-        var command = $"dotnet {string.Join(" ", args)}";
-
-        var newJob = new BuildJob(psi, buildId, command, normalizedPath, "publish", retention);
-
-        lock (_lock)
-        {
+            newJob = new BuildJob(psi, buildId, command, normalizedPath, "publish", retention);
             _currentBuild?.Dispose();
             _currentBuild = newJob;
         }
