@@ -96,11 +96,7 @@ public sealed class ProjectEngine : IDisposable
         solutionDir ??= InferSolutionDir(projectPath);
 
         var mtime = File.GetLastWriteTimeUtc(projectPath);
-        var propsKey = additionalProperties is { Count: > 0 }
-            ? string.Join(",", additionalProperties
-                .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
-                .Select(kv => $"{kv.Key}={kv.Value}"))
-            : "";
+        var propsKey = BuildPropsKey(additionalProperties);
         var key = $"{projectPath}|{configuration}|{platform}|{solutionDir}|{propsKey}";
 
         if (_cache.TryGetValue(key, out var cached) && cached.Mtime == mtime)
@@ -109,6 +105,23 @@ public sealed class ProjectEngine : IDisposable
         var snapshot = EvaluateCore(projectPath, configuration, platform, solutionDir, additionalProperties);
         _cache[key] = new CachedProject { Mtime = mtime, Snapshot = snapshot };
         return snapshot;
+    }
+
+    /// <summary>
+    /// Build a collision-free cache-key fragment from an <c>additionalProperties</c>
+    /// dictionary. Each key and value is URL-encoded with <see cref="Uri.EscapeDataString"/>
+    /// before being joined with <c>=</c>, and the resulting pairs are joined with <c>,</c>.
+    /// Encoding both halves is required because property values can contain the
+    /// separator characters <c>,</c> and <c>=</c> — without escaping, distinct
+    /// inputs such as <c>{A=B, C=D}</c> and <c>{A="B,C=D"}</c> collide on the
+    /// naive <c>k=v,k=v</c> serialization.
+    /// </summary>
+    internal static string BuildPropsKey(Dictionary<string, string>? additionalProperties)
+    {
+        if (additionalProperties is not { Count: > 0 }) return "";
+        return string.Join(",", additionalProperties
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
     }
 
     private static ProjectSnapshot EvaluateCore(string projectPath, string configuration, string platform,
