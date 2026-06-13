@@ -36,7 +36,7 @@ public class DownloadManagerTests : IDisposable
         {
             barrier.SignalAndWait();
             var job = _manager.StartDownload(
-                new HttpClient(new NoOpHandler()),
+                () => new HttpClient(new NoOpHandler()),
                 "http://localhost/fake.zip",
                 artifactId,
                 "test-artifact");
@@ -53,9 +53,9 @@ public class DownloadManagerTests : IDisposable
     public void StartDownload_DifferentArtifacts_CreatesSeparateJobs()
     {
         var job1 = _manager.StartDownload(
-            new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 1, "artifact-a");
+            () => new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 1, "artifact-a");
         var job2 = _manager.StartDownload(
-            new HttpClient(new NoOpHandler()), "http://localhost/b.zip", 2, "artifact-b");
+            () => new HttpClient(new NoOpHandler()), "http://localhost/b.zip", 2, "artifact-b");
 
         Assert.NotEqual(job1.DownloadId, job2.DownloadId);
     }
@@ -64,9 +64,9 @@ public class DownloadManagerTests : IDisposable
     public void StartDownload_SameArtifact_Sequential_ReturnsSameJob()
     {
         var job1 = _manager.StartDownload(
-            new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 99, "artifact");
+            () => new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 99, "artifact");
         var job2 = _manager.StartDownload(
-            new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 99, "artifact");
+            () => new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 99, "artifact");
 
         Assert.Same(job1, job2);
     }
@@ -77,7 +77,7 @@ public class DownloadManagerTests : IDisposable
     public void GetDownload_ExistingId_ReturnsJob()
     {
         var job = _manager.StartDownload(
-            new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 10, "artifact");
+            () => new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 10, "artifact");
 
         Assert.NotNull(_manager.GetDownload(job.DownloadId));
     }
@@ -92,9 +92,9 @@ public class DownloadManagerTests : IDisposable
     public void GetAllDownloads_ReturnsAllActive()
     {
         _manager.StartDownload(
-            new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 1, "a");
+            () => new HttpClient(new NoOpHandler()), "http://localhost/a.zip", 1, "a");
         _manager.StartDownload(
-            new HttpClient(new NoOpHandler()), "http://localhost/b.zip", 2, "b");
+            () => new HttpClient(new NoOpHandler()), "http://localhost/b.zip", 2, "b");
 
         var all = _manager.GetAllDownloads();
         Assert.Equal(2, all.Count);

@@ -60,10 +60,14 @@ public sealed class DownloadManager : IDisposable
     }
 
     /// <summary>
-    /// Start a download from a direct URL with a pre-authenticated client.
-    /// Used for ADO artifacts where the download URL is known from the listing.
+    /// Start a download from a direct URL using a lazily-resolved authenticated
+    /// client. The <paramref name="clientFactory"/> is invoked only on a
+    /// cache-miss, mirroring the GitHub overload's lazy
+    /// <c>_github.CreateAuthenticatedClient()</c> call. This ensures repeat
+    /// callers within the cache TTL do not allocate extra <see cref="HttpClient"/>
+    /// instances that would be dropped without being stored on a job.
     /// </summary>
-    public DownloadJob StartDownload(HttpClient httpClient, string downloadUrl, long artifactId, string artifactName)
+    public DownloadJob StartDownload(Func<HttpClient> clientFactory, string downloadUrl, long artifactId, string artifactName)
     {
         lock (_startLock)
         {
@@ -76,7 +80,7 @@ public sealed class DownloadManager : IDisposable
             var downloadId = $"dl-{Interlocked.Increment(ref _counter)}";
             var destPath = Path.Combine(_cacheDir, $"{downloadId}_{artifactId}.zip");
 
-            var job = new DownloadJob(httpClient, downloadUrl, destPath,
+            var job = new DownloadJob(clientFactory(), downloadUrl, destPath,
                 downloadId, artifactId, artifactName);
 
             _downloads[downloadId] = job;
