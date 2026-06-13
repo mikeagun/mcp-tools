@@ -58,6 +58,9 @@ public sealed class CiProviderResolver
 
     /// <summary>
     /// Get or create an ADO provider for the given org, reusing cached instances.
+    /// Newly created providers have their auth resolution warmed in the
+    /// background so the first request to a new org/project doesn't pay the
+    /// cost of az CLI / GCM subprocess invocation on the hot path.
     /// </summary>
     public AdoCiProvider GetOrCreateAdoProvider(string orgUrl, string project, string? originalHost = null)
     {
@@ -65,6 +68,7 @@ public sealed class CiProviderResolver
         if (!_adoProviders.TryGetValue(key, out var provider))
         {
             provider = new AdoCiProvider(orgUrl, project, _cache, originalHost);
+            provider.WarmAuth();
             _adoProviders[key] = provider;
         }
         return provider;
