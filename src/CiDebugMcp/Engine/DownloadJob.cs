@@ -43,6 +43,42 @@ public sealed class DownloadJob : IDisposable
         _downloadTask = Task.Run(() => DownloadAsync(http, downloadUrl));
     }
 
+    /// <summary>
+    /// Test-only constructor: produces a <see cref="DownloadJob"/> already
+    /// marked completed, with <paramref name="destPath"/> pointing to
+    /// pre-written content. Bypasses the HTTP download loop entirely so
+    /// tests exercising <see cref="Extract"/> / <see cref="SearchContents"/>
+    /// / <see cref="GetStatus"/> on already-downloaded artifacts do not
+    /// depend on <see cref="Task.Run(Action)"/> being scheduled inside the
+    /// test's wait budget. The previous "real download via mock handler +
+    /// blocking WaitForNews" pattern was the root cause of the
+    /// DownloadJobTests parallel-execution flake: under heavy parallel
+    /// load (the cross-project test run on a busy machine), the download
+    /// Task could be queued but not started within the 10s wait budget,
+    /// causing the test to observe an incomplete job.
+    /// </summary>
+    internal DownloadJob(string destPath, string downloadId, long artifactId, string artifactName)
+    {
+        DownloadId = downloadId;
+        ArtifactId = artifactId;
+        ArtifactName = artifactName;
+        DestPath = destPath;
+        _downloadTask = Task.CompletedTask;
+        // Populate ZIP metadata (_contents, _totalFiles, _uncompressedSize)
+        // exactly as the real download path does after streaming the file
+        // to disk, so GetStatus / SearchContents / Extract observe a fully
+        // populated job — identical to the post-download state.
+        ParseZipDirectory();
+        // Match the production post-download invariant for the progress
+        // fields too — readers of GetStatus see a non-zero Percent and a
+        // realistic transfer-size summary instead of a degenerate
+        // 0-bytes-of-0 snapshot.
+        var totalBytes = new FileInfo(destPath).Length;
+        _bytesDownloaded = totalBytes;
+        _totalBytes = totalBytes;
+        _completed = true;
+    }
+
     private async Task DownloadAsync(HttpClient http, string url)
     {
         try

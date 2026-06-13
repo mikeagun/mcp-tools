@@ -16,4 +16,8 @@
     <ProjectReference Include="..\McpSharp\McpSharp.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CiDebugMcp.Tests" />
+  </ItemGroup>
+
 </Project>

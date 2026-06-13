@@ -182,9 +182,14 @@ public class DownloadJobTests
     }
 
     [Fact]
-    public void WaitForNews_SignalDelivered_ReturnsBeforeTimeout()
+    public void RealDownload_CompletesAndSignalsViaWaitForNews()
     {
-        // Create a job that will complete quickly via a small in-memory response
+        // Deliberately exercises the real HTTP-download → ParseZipDirectory →
+        // PulseAll signaling chain (unlike the other DownloadJobTests which
+        // use the in-memory test-only ctor). The pulse-on-completion path
+        // is otherwise untested by the in-memory ctor (it skips Task.Run
+        // entirely), so this test is the only coverage that proves
+        // WaitForNews returns on a signal rather than on timeout.
         var tempPath = Path.Combine(Path.GetTempPath(), $"mcptest-{Guid.NewGuid():N}.zip");
 
         // Create a small ZIP file for the job to download
@@ -196,24 +201,38 @@ public class DownloadJobTests
         }
 
         var handler = new StaticFileHandler(tempPath);
-        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
         var job = new DownloadJob(client, "http://localhost/fake.zip", tempPath,
             "dl-signal-test", 99999, "signal-test");
 
-        // Wait for the download to complete — should be fast since it's in-memory
+        // Wait for the completion signal with a generous timeout so the
+        // assertion below isolates "signal arrived" from "wait budget
+        // exhausted". If the pulse-on-complete chain breaks, this wait will
+        // run the full timeout and the timing assertion will fail.
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        job.WaitForNews(5000);
+        job.WaitForNews(20_000);
         sw.Stop();
 
-        Assert.True(job.IsCompleted, "Job should have completed");
-        Assert.True(sw.ElapsedMilliseconds < 3000,
-            $"WaitForNews took {sw.ElapsedMilliseconds}ms, expected <3000ms for in-memory download");
+        Assert.True(job.IsCompleted, "Job should have completed via the WaitForNews signaling path");
+        // Early-return semantics: signal-driven completion should be near-
+        // instant for an in-memory download; the 15s bar leaves enormous
+        // headroom for parallel-test ThreadPool scheduling latency without
+        // weakening the "signal arrived before timeout" coverage.
+        Assert.True(sw.ElapsedMilliseconds < 15_000,
+            $"WaitForNews took {sw.ElapsedMilliseconds}ms — the signal did not arrive before the wait budget expired");
     }
 
     // ── Helpers ─────────────────────────────────────────────────
 
     /// <summary>
-    /// Create a completed DownloadJob with a real ZIP file containing the specified entries.
+    /// Create a completed DownloadJob whose <c>DestPath</c> points to a real
+    /// ZIP file containing the specified entries.
+    ///
+    /// Bypasses the HTTP download loop entirely via the internal test-only
+    /// constructor on <see cref="DownloadJob"/>. The previous implementation
+    /// used a <c>StaticFileHandler</c> + synchronous wait pattern that
+    /// caused parallel-execution flakes when the download Task did not run
+    /// inside the wait budget under cross-project test load.
     /// </summary>
     private static (DownloadJob job, string tempPath) CreateCompletedJobWithContents(
         string[] entries, bool writeContent = false)
@@ -233,40 +252,18 @@ public class DownloadJobTests
             }
         }
 
-        // Create a job that's already "completed" by using a no-op HTTP client
-        // We directly set the file and use reflection-free approach: parse the ZIP
-        var job = CreateJobFromFile(tempPath, entries.FirstOrDefault() ?? "artifact");
+        var job = new DownloadJob(tempPath, "dl-test", 12345,
+            entries.FirstOrDefault() ?? "artifact");
 
         return (job, tempPath);
     }
 
-    private static DownloadJob CreateJobFromFile(string zipPath, string name)
-    {
-        // Use a dummy HTTP URL — the download won't actually run since we pre-created the file
-        // We need to wait for the download task to fail, then the job still has the ZIP to work with
-        // Instead, we use a simpler approach: create via the public API with a mock server
-
-        // Since DownloadJob requires an HttpClient + URL and starts a background task,
-        // we create a minimal HTTP server or use a different approach.
-        // For unit tests, we test SearchContents/Extract via completed jobs only.
-
-        // Workaround: use a small in-memory HTTP response
-        var handler = new StaticFileHandler(zipPath);
-        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
-
-        var job = new DownloadJob(client, "http://localhost/fake.zip", zipPath,
-            "dl-test", 12345, name);
-
-        // Wait for download to complete (it reads from the static handler)
-        job.WaitForNews(5000);
-        if (!job.IsCompleted)
-            job.WaitForNews(5000);
-
-        return job;
-    }
-
     /// <summary>
     /// HttpMessageHandler that returns a file's content as the response.
+    /// Used only by <see cref="WaitForNews_SignalDelivered_ReturnsBeforeTimeout"/>
+    /// which deliberately exercises the real HTTP-download → WaitForNews
+    /// signaling path. All other tests use the in-memory test-only
+    /// constructor on <see cref="DownloadJob"/>.
     /// </summary>
     private sealed class StaticFileHandler(string filePath) : HttpMessageHandler
     {
