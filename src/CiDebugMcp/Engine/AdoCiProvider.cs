@@ -21,6 +21,7 @@ public sealed class AdoCiProvider : ICiProvider
     private readonly string? _originalHost;
     private readonly object _authLock = new();
     private volatile bool _authResolved;
+    private readonly Func<AuthResult?> _authResolver;
 
     /// <summary>
     /// Default per-request HTTP timeout for the ADO REST API client.
@@ -43,11 +44,25 @@ public sealed class AdoCiProvider : ICiProvider
     /// <param name="project">e.g. "myproject"</param>
     /// <param name="originalHost">Original hostname for GCM lookup (e.g. "myorg.visualstudio.com")</param>
     public AdoCiProvider(string orgUrl, string project, LogCache cache, string? originalHost = null)
+        : this(orgUrl, project, cache, originalHost, authResolver: null)
+    {
+    }
+
+    /// <summary>
+    /// Test seam: lets tests inject a deterministic <paramref name="authResolver"/>
+    /// instead of running the real credential-resolution chain (env vars,
+    /// Azure CLI subprocess, Git Credential Manager subprocess). Production
+    /// callers should use the public constructor, which defaults to
+    /// <see cref="ResolveAdoAuth"/>.
+    /// </summary>
+    internal AdoCiProvider(string orgUrl, string project, LogCache cache, string? originalHost,
+        Func<AuthResult?>? authResolver)
     {
         _orgUrl = orgUrl.TrimEnd('/');
         _project = project;
         _cache = cache;
         _originalHost = originalHost;
+        _authResolver = authResolver ?? ResolveAdoAuth;
 
         _http = new HttpClient
         {
@@ -57,6 +72,14 @@ public sealed class AdoCiProvider : ICiProvider
         _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ci-debug-mcp", "0.1"));
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
+
+    /// <summary>
+    /// Test seam: read-only view of the current Authorization header so tests
+    /// can observe what <see cref="EnsureAuth"/> set without depending on
+    /// reflection or making the underlying <see cref="HttpClient"/> public.
+    /// </summary>
+    internal AuthenticationHeaderValue? AuthorizationHeader
+        => _http.DefaultRequestHeaders.Authorization;
 
     /// <summary>
     /// Start auth resolution in the background so the first API call doesn't pay
@@ -791,7 +814,7 @@ public sealed class AdoCiProvider : ICiProvider
 
     // ── Private: auth ───────────────────────────────────────────
 
-    private void EnsureAuth()
+    internal void EnsureAuth()
     {
         if (_authResolved) return;
 
@@ -803,7 +826,7 @@ public sealed class AdoCiProvider : ICiProvider
         {
             if (_authResolved) return;
 
-            var auth = ResolveAdoAuth();
+            var auth = _authResolver();
             if (auth != null)
             {
                 _http.DefaultRequestHeaders.Authorization =
