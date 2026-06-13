@@ -146,14 +146,36 @@ public interface IRuleMatcher
 
 /// <summary>
 /// Base policy configuration. Servers extend with additional fields.
+///
+/// Thread-safety: <see cref="UserRules"/> and <see cref="DenyRules"/> are
+/// the only fields a live <c>PolicyEngine</c> mutates after construction
+/// (via <c>SaveRuleToPolicy</c> / <c>SaveDenyRuleToPolicy</c>, which build
+/// a fresh <see cref="List{T}"/> off the existing one and atomically swap
+/// the reference). Reads from <c>Evaluate</c> can race with that swap on
+/// any architecture with a weak memory model (e.g. ARM64), so the
+/// publication path uses <see cref="Volatile.Write{T}(ref T, T)"/> on the
+/// writer side and <see cref="Volatile.Read{T}(ref T)"/> on the reader
+/// side. Mutating an in-place list returned from these properties would
+/// break this invariant — always replace the entire list.
 /// </summary>
 public class PolicyConfig
 {
+    private List<UserRule>? _userRules;
+    private List<UserRule>? _denyRules;
+
     [JsonPropertyName("user_rules")]
-    public List<UserRule>? UserRules { get; set; }
+    public List<UserRule>? UserRules
+    {
+        get => Volatile.Read(ref _userRules);
+        set => Volatile.Write(ref _userRules, value);
+    }
 
     [JsonPropertyName("deny_rules")]
-    public List<UserRule>? DenyRules { get; set; }
+    public List<UserRule>? DenyRules
+    {
+        get => Volatile.Read(ref _denyRules);
+        set => Volatile.Write(ref _denyRules, value);
+    }
 
     public static readonly JsonSerializerOptions JsonOptions = new()
     {

@@ -198,6 +198,145 @@ public class PolicyEngineTests : IDisposable
         Assert.Single(engine.Config.DenyRules);
     }
 
+    // -- Volatile publication of UserRules / DenyRules ----------------------
+
+    /// <summary>
+    /// Sanity test for the property round-trip on <see cref="PolicyConfig"/>
+    /// after the auto-properties were converted to backing-field properties
+    /// using <see cref="Volatile.Read{T}(ref T)"/> / <see cref="Volatile.Write{T}(ref T, T)"/>.
+    /// </summary>
+    [Fact]
+    public void PolicyConfig_UserRules_RoundTrips()
+    {
+        var config = new PolicyConfig();
+        Assert.Null(config.UserRules);
+        Assert.Null(config.DenyRules);
+
+        var rules = new List<UserRule>
+        {
+            new() { Rule = new ApprovalRule { Tools = ["a"] } },
+            new() { Rule = new ApprovalRule { Tools = ["b"] } },
+        };
+        config.UserRules = rules;
+        Assert.Same(rules, config.UserRules);
+        Assert.Equal(2, config.UserRules.Count);
+
+        config.UserRules = null;
+        Assert.Null(config.UserRules);
+    }
+
+    /// <summary>
+    /// JSON serialization must continue to work after the auto-property
+    /// conversion. JsonSerializer drives reads/writes through the public
+    /// getters/setters, so the volatile semantics are transparent.
+    /// </summary>
+    [Fact]
+    public void PolicyConfig_JsonRoundTrip_PreservesRules()
+    {
+        var original = new PolicyConfig
+        {
+            UserRules = [new UserRule { Rule = new ApprovalRule { Tools = ["build"] } }],
+            DenyRules = [new UserRule { Rule = new ApprovalRule { Tools = ["dangerous"] } }],
+        };
+
+        var json = JsonSerializer.Serialize(original, PolicyConfig.JsonOptions);
+        var round = JsonSerializer.Deserialize<PolicyConfig>(json, PolicyConfig.JsonOptions)!;
+
+        Assert.Single(round.UserRules!);
+        Assert.Equal("build", round.UserRules![0].Rule!.Tools![0]);
+        Assert.Single(round.DenyRules!);
+        Assert.Equal("dangerous", round.DenyRules![0].Rule!.Tools![0]);
+    }
+
+    /// <summary>
+    /// Stress test concurrent SaveRule + Evaluate against the same engine.
+    ///
+    /// Under the prior `auto-property + volatile _config` design, concurrent
+    /// readers could in principle observe an inconsistent list state on a
+    /// weak-memory architecture (ARM64) — though x64's stronger memory model
+    /// masks the issue. The fix moves the volatile semantics to the
+    /// PolicyConfig.UserRules/DenyRules properties so the publication
+    /// (build new list off old → swap reference) is paired with proper
+    /// acquire/release ordering on both sides.
+    ///
+    /// On x64 this test catches the BIG defects rather than the subtle
+    /// memory-model ones — e.g., if a maintainer "fixed" the property to
+    /// mutate the existing list in place (`_userRules.AddRange(value)`),
+    /// concurrent readers would observe `InvalidOperationException` mid-
+    /// enumeration. Pinning the no-exception invariant prevents that
+    /// regression class.
+    /// </summary>
+    [Fact]
+    public async Task SaveRule_ConcurrentWithEvaluate_NeverThrows()
+    {
+        var engine = new PolicyEngine(
+            new PolicyConfig(), new AllowAllClassifier(), new MatchAllMatcher(),
+            policyFilePath: Path.Combine(_tempDir, "concurrent.json"));
+
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        var readCount = 0;
+        var writeCount = 0;
+        Exception? failure = null;
+
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            try
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    // Evaluate iterates UserRules / DenyRules — any in-place
+                    // mutation would surface here as InvalidOperationException
+                    // (or NullReferenceException as the adversarial revert
+                    // confirmed).
+                    engine.Evaluate("build", new JsonObject());
+                    Interlocked.Increment(ref readCount);
+                }
+            }
+            catch (Exception ex)
+            {
+                Interlocked.CompareExchange(ref failure, ex, null);
+            }
+        })).ToArray();
+
+        var writers = Enumerable.Range(0, 2).Select(w => Task.Run(() =>
+        {
+            try
+            {
+                var i = 0;
+                while (!stop.IsCancellationRequested)
+                {
+                    if (w == 0)
+                    {
+                        engine.SaveRuleToPolicy(
+                            new ApprovalRule { Tools = [$"allow-{i++}"] }, "stress");
+                    }
+                    else
+                    {
+                        // Deny rules use the same Volatile-published property
+                        // path — cover both branches in one test.
+                        engine.SaveDenyRuleToPolicy(
+                            new ApprovalRule { Tools = [$"deny-{i++}"] }, "stress");
+                    }
+                    Interlocked.Increment(ref writeCount);
+                }
+            }
+            catch (Exception ex)
+            {
+                Interlocked.CompareExchange(ref failure, ex, null);
+            }
+        })).ToArray();
+
+        await Task.WhenAll(readers.Concat(writers));
+        Assert.Null(failure);
+
+        // Sanity: prove the test actually exercised the race rather than
+        // silently observing zero activity. Both loops must have run enough
+        // iterations that any concurrency bug would have surfaced.
+        Assert.True(readCount > 100, $"Readers only ran {readCount} iterations — test starved");
+        Assert.True(writeCount > 5, $"Writers only ran {writeCount} iterations — test starved");
+    }
+
     // -- Helpers --------------------------------------------------------------
 
     private sealed class AllowAllClassifier : IToolClassifier

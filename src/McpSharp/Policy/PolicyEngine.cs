@@ -19,7 +19,15 @@ public sealed class PolicyEngine
     private readonly string _defaultFileName;
     private readonly object _fileLock = new();
 
-    private volatile PolicyConfig _config;
+    // Plain reference field (no `volatile`). The volatile semantics that
+    // matter for `Evaluate` ↔ `SaveRuleInternal` concurrency live on the
+    // PolicyConfig.UserRules/DenyRules properties, which use
+    // Volatile.Read/Write on their backing fields. The reference held in
+    // `_config` itself is only ever assigned in the ctor; making it
+    // `volatile` here misled readers into thinking the publication
+    // invariant lived at this level when it actually lives one level
+    // deeper.
+    private PolicyConfig _config;
     private readonly List<ApprovalRule> _sessionApprovals = [];
     private readonly List<ApprovalRule> _sessionDenials = [];
     private readonly object _sessionLock = new();
@@ -201,8 +209,12 @@ public sealed class PolicyEngine
             File.Move(tempPath, filePath, overwrite: true);
 
             // Update in-memory config: create new list instances so concurrent
-            // readers (Evaluate → MatchesAny) see either old or new list, never
-            // a half-modified one. Preserves the server-specific config type.
+            // readers (Evaluate → MatchesAny) see either the old or the new
+            // list, never a half-modified one. The PolicyConfig.UserRules /
+            // DenyRules setters publish via Volatile.Write so readers using
+            // the matching Volatile.Read getter observe the swap with proper
+            // acquire/release semantics even on weak-memory architectures
+            // (e.g. ARM64).
             if (isDeny)
             {
                 var updated = _config.DenyRules != null
