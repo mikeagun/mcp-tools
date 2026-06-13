@@ -59,7 +59,11 @@ public sealed class OutputBuffer : IDisposable
     /// <summary>True if output has been explicitly freed.</summary>
     public bool IsFreed { get { lock (_lock) return _freed; } }
 
-    /// <summary>True if any lines were truncated in memory (full content on disk).</summary>
+    /// <summary>
+    /// True if any oversized lines were truncated in memory. In full retention
+    /// mode the full content is preserved in the disk spill file; in tail
+    /// retention mode the overflow is discarded.
+    /// </summary>
     public bool HasTruncatedLines { get { lock (_lock) return _hasTruncatedLines; } }
 
     /// <summary>True if a disk spill file exists.</summary>
@@ -78,19 +82,30 @@ public sealed class OutputBuffer : IDisposable
             var rawByteCount = (long)Encoding.UTF8.GetByteCount(line);
             var alreadyWrittenToDisk = false;
 
-            // Truncate oversized lines in memory but preserve full content on disk.
-            // This prevents unbounded memory growth from a single line while keeping
-            // the full content searchable via disk-backed Search/FindFirstMatch.
+            // Truncate oversized lines in memory. In full mode we also stream
+            // the untruncated line to the disk spill file so Search and
+            // FindFirstMatch can scan it. In tail mode no disk spill exists,
+            // so the overflow is discarded — the truncation marker admits this
+            // and tells the agent how to re-enable preservation.
+            //
+            // diskBacked is set to true only after a SUCCESSFUL disk write so
+            // the marker text never promises preservation that did not happen
+            // (e.g. when an I/O failure was swallowed by the best-effort try).
             if (rawByteCount > MaxLineLengthBytes)
             {
+                var diskBacked = false;
                 if (_mode == "full")
                 {
                     EnsureDiskSpillLocked();
-                    try { _diskWriter!.WriteLine(line); }
-                    catch { /* best-effort disk write */ }
-                    alreadyWrittenToDisk = true;
+                    try
+                    {
+                        _diskWriter!.WriteLine(line);
+                        diskBacked = true;
+                        alreadyWrittenToDisk = true;
+                    }
+                    catch { /* best-effort disk write; marker will admit no disk copy */ }
                 }
-                line = TruncateLine(line, MaxLineLengthBytes);
+                line = TruncateLine(line, MaxLineLengthBytes, diskBacked);
                 _hasTruncatedLines = true;
             }
 
@@ -137,15 +152,26 @@ public sealed class OutputBuffer : IDisposable
 
     /// <summary>
     /// Truncate a line to fit within maxBytes (UTF-8) at a char boundary.
-    /// Appends a marker indicating the original size and that full content is on disk.
+    /// Appends a marker indicating the original size and whether the full
+    /// content is preserved elsewhere.
     /// </summary>
-    internal static string TruncateLine(string line, long maxBytes)
+    /// <param name="line">The line to truncate.</param>
+    /// <param name="maxBytes">Maximum UTF-8 byte length of the returned string.</param>
+    /// <param name="diskBacked">
+    /// When <c>true</c>, the marker promises the full content is preserved in
+    /// the build log on disk (full retention mode). When <c>false</c>, the
+    /// marker admits the overflow was discarded with no on-disk copy (tail
+    /// retention mode) and tells the agent how to re-enable preservation.
+    /// </param>
+    internal static string TruncateLine(string line, long maxBytes, bool diskBacked)
     {
         var totalBytes = Encoding.UTF8.GetByteCount(line);
         if (totalBytes <= maxBytes) return line;
 
         // Reserve space for the truncation marker
-        var marker = $"... [LINE TRUNCATED: {totalBytes:N0} bytes total — full content preserved in build log on disk]";
+        var marker = diskBacked
+            ? $"... [LINE TRUNCATED: {totalBytes:N0} bytes total — full content preserved in build log on disk]"
+            : $"... [LINE TRUNCATED: {totalBytes:N0} bytes total — overflow discarded; rerun with retention=full to preserve]";
         var markerBytes = Encoding.UTF8.GetByteCount(marker);
         var targetBytes = maxBytes - markerBytes;
         if (targetBytes < 100) targetBytes = 100; // ensure at least some content

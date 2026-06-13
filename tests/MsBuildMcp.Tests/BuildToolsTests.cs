@@ -431,20 +431,32 @@ public class OutputBufferTests : IDisposable
         var buf = CreateBuffer();
         buf.AddLine("header line");
 
-        // Build an oversized line with a unique marker buried in the middle
-        var halfSize = (int)OutputBuffer.MaxLineLengthBytes / 2;
-        var oversized = new string('A', halfSize) + "UNIQUE_PATTERN_IN_MIDDLE" + new string('B', halfSize);
+        // Place the unique pattern AFTER MaxLineLengthBytes so it falls beyond
+        // the memory-truncation boundary. The memory copy retains roughly the
+        // first 1MB of the line (target = MaxLineLengthBytes − marker length),
+        // so a pattern past MaxLineLengthBytes is provably NOT in memory and
+        // MUST be located via the disk-first search branch.
+        //
+        // Adversarial: deleting the `_hasTruncatedLines` disk-first branch in
+        // Search and FindFirstMatch makes this test fail (the in-memory scan
+        // alone cannot see the pattern).
+        var oversized = new string('A', (int)OutputBuffer.MaxLineLengthBytes + 100)
+            + "UNIQUE_PATTERN_PAST_TRUNCATION"
+            + new string('B', 100);
         buf.AddLine(oversized);
         buf.AddLine("footer line");
 
-        // The unique pattern is past the truncation point in memory,
-        // but should be findable via disk-backed search
-        var result = buf.Search("UNIQUE_PATTERN_IN_MIDDLE");
+        // Sanity: confirm the pattern is indeed missing from the memory copy
+        var memorySlice = buf.GetTail(3);
+        var truncatedInMemory = memorySlice.Lines.First(l => l.StartsWith("AAAA"));
+        Assert.DoesNotContain("UNIQUE_PATTERN_PAST_TRUNCATION", truncatedInMemory);
+
+        var result = buf.Search("UNIQUE_PATTERN_PAST_TRUNCATION");
         Assert.Equal(1, result.TotalMatches);
         Assert.Equal(2, result.Matches[0].Line); // line 2 is the oversized line
 
         // FindFirstMatch should also work via disk
-        var firstMatch = buf.FindFirstMatch("UNIQUE_PATTERN_IN_MIDDLE");
+        var firstMatch = buf.FindFirstMatch("UNIQUE_PATTERN_PAST_TRUNCATION");
         Assert.Equal(2, firstMatch);
     }
 
@@ -472,7 +484,7 @@ public class OutputBufferTests : IDisposable
         var multiByteContent = new string('\u00E9', 500_000); // é = 2 bytes in UTF-8
         var line = "PREFIX_" + multiByteContent + "_SUFFIX";
 
-        var truncated = OutputBuffer.TruncateLine(line, 100_000);
+        var truncated = OutputBuffer.TruncateLine(line, 100_000, diskBacked: true);
         Assert.Contains("LINE TRUNCATED", truncated);
 
         // Verify the truncated string is valid (no partial multi-byte chars)
@@ -495,5 +507,44 @@ public class OutputBufferTests : IDisposable
         var slice = buf.GetTail(1);
         Assert.Single(slice.Lines);
         Assert.Contains("LINE TRUNCATED", slice.Lines[0]);
+        // The marker must honestly admit that no disk copy exists in tail mode
+        // and must point the agent at the way to preserve future overflow.
+        Assert.Contains("overflow discarded", slice.Lines[0]);
+        Assert.Contains("retention=full", slice.Lines[0]);
+        Assert.DoesNotContain("preserved in build log on disk", slice.Lines[0]);
+    }
+
+    [Fact]
+    public void FullMode_OversizedLine_MarkerStatesDiskBacked()
+    {
+        var buf = CreateBuffer();
+        var oversized = new string('Z', (int)OutputBuffer.MaxLineLengthBytes + 5000);
+        buf.AddLine(oversized);
+
+        Assert.True(buf.HasTruncatedLines);
+        Assert.True(buf.HasDiskSpill); // full mode spills to disk
+
+        var slice = buf.GetTail(1);
+        Assert.Single(slice.Lines);
+        Assert.Contains("LINE TRUNCATED", slice.Lines[0]);
+        // The marker must promise the full content lives on disk in full mode
+        // and must NOT carry the tail-mode "overflow discarded" language.
+        Assert.Contains("preserved in build log on disk", slice.Lines[0]);
+        Assert.DoesNotContain("overflow discarded", slice.Lines[0]);
+    }
+
+    [Fact]
+    public void TruncateLine_DiskBackedFlag_SwitchesMarker()
+    {
+        var line = new string('A', 1000);
+        var diskMarker = OutputBuffer.TruncateLine(line, 200, diskBacked: true);
+        var noDiskMarker = OutputBuffer.TruncateLine(line, 200, diskBacked: false);
+
+        Assert.Contains("preserved in build log on disk", diskMarker);
+        Assert.DoesNotContain("overflow discarded", diskMarker);
+
+        Assert.Contains("overflow discarded", noDiskMarker);
+        Assert.Contains("retention=full", noDiskMarker);
+        Assert.DoesNotContain("preserved in build log on disk", noDiskMarker);
     }
 }
