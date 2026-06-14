@@ -189,6 +189,18 @@ public sealed class OutputBuffer : IDisposable
                 hi = mid - 1;
         }
 
+        // The binary search converges on a UTF-16 char index. A 4-byte UTF-8
+        // code point (e.g. an emoji like 😀 U+1F600) is encoded as a UTF-16
+        // surrogate PAIR — a high surrogate at line[i] and a low surrogate
+        // at line[i+1]. If `lo` lands between them, slicing at `lo` would
+        // include the high surrogate without its low counterpart, and the
+        // subsequent UTF-8 encoding of that span would emit U+FFFD
+        // (replacement character) where the original code point used to
+        // be — silently corrupting the prefix. Back off one position so the
+        // slice ends BEFORE the orphaned high surrogate.
+        if (lo > 0 && lo < line.Length && char.IsHighSurrogate(line[lo - 1]))
+            lo--;
+
         return string.Concat(line.AsSpan(0, lo), marker);
     }
 
