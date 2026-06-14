@@ -493,6 +493,63 @@ public class OutputBufferTests : IDisposable
         Assert.Equal(truncated, roundTrip);
     }
 
+    /// <summary>
+    /// A 4-byte UTF-8 code point (e.g. an emoji like 😀 U+1F600) is encoded
+    /// as a UTF-16 surrogate PAIR — a high surrogate at <c>line[i]</c> and
+    /// a low surrogate at <c>line[i+1]</c>. The binary search inside
+    /// <c>TruncateLine</c> operates on UTF-16 char indices; if it converges
+    /// between the high and low surrogates, naively slicing at that index
+    /// would orphan the high surrogate. Encoding the orphan back to UTF-8
+    /// substitutes <c>U+FFFD</c> (replacement character), silently
+    /// corrupting the prefix.
+    ///
+    /// The fix backs off one UTF-16 position when <c>line[lo-1]</c> is a
+    /// high surrogate, so the slice ends BEFORE the orphan. This test
+    /// sweeps a range of <c>maxBytes</c> values across the emoji's byte
+    /// position — for every value the resulting truncation must round-trip
+    /// through UTF-8 unchanged (i.e. no U+FFFD substitution).
+    ///
+    /// Adversarial: removing the <c>char.IsHighSurrogate(line[lo - 1])</c>
+    /// guard in <c>TruncateLine</c> makes at least one of the swept
+    /// boundaries fail the round-trip equality assertion.
+    /// </summary>
+    [Fact]
+    public void TruncateLine_SurrogatePairAtBoundary_DoesNotSplitIntoReplacementChar()
+    {
+        const string emoji = "\uD83D\uDE00"; // 😀 (U+1F600) — 4 bytes UTF-8
+        var prefix = new string('A', 1000); // 1000 bytes UTF-8
+        var suffix = new string('B', 10_000);
+        var line = prefix + emoji + suffix;
+
+        // Sweep maxBytes across a wide range of byte positions where the
+        // binary search could converge in or near the emoji's surrogate
+        // pair. The exact boundary depends on the truncation-marker length
+        // (which depends on the bytes-total number formatted into the
+        // marker), so a wide sweep keeps the test resilient to reasonable
+        // marker drift — a narrow sweep coupled to the current marker
+        // size would silently pass even if the production guard were
+        // removed, given future edits to the marker text.
+        var totalBytes = Encoding.UTF8.GetByteCount(line);
+        var sampleMarker = $"... [LINE TRUNCATED: {totalBytes:N0} bytes total — full content preserved in build log on disk]";
+        var markerBytes = Encoding.UTF8.GetByteCount(sampleMarker);
+
+        for (var targetBytes = 900; targetBytes <= 1100; targetBytes++)
+        {
+            var maxBytes = targetBytes + markerBytes;
+            var truncated = OutputBuffer.TruncateLine(line, maxBytes, diskBacked: true);
+
+            // Any orphan surrogate in `truncated` would round-trip through
+            // UTF-8 as U+FFFD, breaking equality. Catching it via
+            // `DoesNotContain('\uFFFD', truncated)` directly is also valid;
+            // round-trip equality is the strongest form of the invariant.
+            var encoded = Encoding.UTF8.GetBytes(truncated);
+            var roundTrip = Encoding.UTF8.GetString(encoded);
+            Assert.True(truncated == roundTrip,
+                $"Truncation at maxBytes={maxBytes} (targetBytes={targetBytes}) produced an invalid UTF-16 sequence — round-trip through UTF-8 differs");
+            Assert.DoesNotContain('\uFFFD', truncated);
+        }
+    }
+
     [Fact]
     public void TailMode_OversizedLine_TruncatedInMemory()
     {
