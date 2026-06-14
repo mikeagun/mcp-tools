@@ -22,6 +22,7 @@ public sealed class AdoCiProvider : ICiProvider
     private readonly object _authLock = new();
     private volatile bool _authResolved;
     private readonly Func<AuthResult?> _authResolver;
+    private readonly Func<int, string, Task<ParsedLog?>> _logFetcher;
 
     /// <summary>
     /// Default per-request HTTP timeout for the ADO REST API client.
@@ -44,25 +45,31 @@ public sealed class AdoCiProvider : ICiProvider
     /// <param name="project">e.g. "myproject"</param>
     /// <param name="originalHost">Original hostname for GCM lookup (e.g. "myorg.visualstudio.com")</param>
     public AdoCiProvider(string orgUrl, string project, LogCache cache, string? originalHost = null)
-        : this(orgUrl, project, cache, originalHost, authResolver: null)
+        : this(orgUrl, project, cache, originalHost, authResolver: null, logFetcher: null)
     {
     }
 
     /// <summary>
-    /// Test seam: lets tests inject a deterministic <paramref name="authResolver"/>
-    /// instead of running the real credential-resolution chain (env vars,
-    /// Azure CLI subprocess, Git Credential Manager subprocess). Production
-    /// callers should use the public constructor, which defaults to
-    /// <see cref="ResolveAdoAuth"/>.
+    /// Test seam: lets tests inject deterministic <paramref name="authResolver"/>
+    /// and <paramref name="logFetcher"/> delegates instead of routing through
+    /// the real credential-resolution chain (env vars, Azure CLI subprocess,
+    /// Git Credential Manager subprocess) or the real per-log-id HTTP fetch
+    /// via <see cref="GetJobLogAsync"/>. Production callers use the public
+    /// constructor, which defaults to <see cref="ResolveAdoAuth"/> for auth
+    /// and to <see cref="GetJobLogAsync"/> with the standard
+    /// <c>"{buildId}:{logId}"</c> jobId encoding for log fetches.
     /// </summary>
     internal AdoCiProvider(string orgUrl, string project, LogCache cache, string? originalHost,
-        Func<AuthResult?>? authResolver)
+        Func<AuthResult?>? authResolver = null,
+        Func<int, string, Task<ParsedLog?>>? logFetcher = null)
     {
         _orgUrl = orgUrl.TrimEnd('/');
         _project = project;
         _cache = cache;
         _originalHost = originalHost;
         _authResolver = authResolver ?? ResolveAdoAuth;
+        _logFetcher = logFetcher ?? (async (buildId, logId) =>
+            await GetJobLogAsync($"{buildId}:{logId}").ConfigureAwait(false));
 
         _http = new HttpClient
         {
@@ -539,7 +546,7 @@ public sealed class AdoCiProvider : ICiProvider
     /// information needed to assemble a <see cref="CiJobFailure"/> after
     /// per-job log downloads complete.
     /// </summary>
-    private sealed record FailedJobItem(
+    internal sealed record FailedJobItem(
         string Name,
         string? JobRecordId,
         string? Result,
@@ -580,7 +587,7 @@ public sealed class AdoCiProvider : ICiProvider
     /// assembly step then treats the missing log as "no errors extracted",
     /// preserving the prior single-job-fails-don't-fail-the-report semantics.
     /// </summary>
-    private async Task<Dictionary<string, ParsedLog>> FetchLogsInParallel(
+    internal async Task<Dictionary<string, ParsedLog>> FetchLogsInParallel(
         int buildId, IReadOnlyList<FailedJobItem> failedJobs)
     {
         // De-duplicate by log id so we don't fetch the same log twice.
@@ -599,7 +606,7 @@ public sealed class AdoCiProvider : ICiProvider
             {
                 try
                 {
-                    var log = await GetJobLogAsync($"{buildId}:{logId}").ConfigureAwait(false);
+                    var log = await _logFetcher(buildId, logId).ConfigureAwait(false);
                     return (logId, log);
                 }
                 catch (Exception ex)
@@ -903,14 +910,97 @@ public sealed class AdoCiProvider : ICiProvider
 
     private static string? GetTokenFromAzCli()
     {
+        // On Windows, 'az' is az.cmd — must invoke via cmd.exe
+        var isWindows = OperatingSystem.IsWindows();
+        var fileName = isWindows ? "cmd.exe" : "az";
+        var arguments = isWindows
+            ? "/c az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv"
+            : "account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv";
+
+        var result = RunCredentialSubprocess(
+            fileName, arguments,
+            timeoutMs: 10_000,
+            timeoutLogContext: "az CLI token retrieval",
+            errorLogContext: "az CLI token retrieval");
+        if (result == null)
+        {
+            // Either timeout (already logged inside helper) or Process.Start failure / exception.
+            return null;
+        }
+
+        var token = result.Stdout.Trim();
+        return result.ExitCode == 0 && token.Length > 0 ? token : null;
+    }
+
+    private static string? GetTokenFromGcm(string host)
+    {
+        var result = RunCredentialSubprocess(
+            fileName: "git",
+            arguments: "credential fill",
+            timeoutMs: 5_000,
+            writeInput: stdin => stdin.Write($"protocol=https\nhost={host}\n\n"),
+            environment: new Dictionary<string, string>
+            {
+                // Prevent UI prompts and terminal prompts — fail fast if GCM
+                // can't resolve non-interactively. Without these, GCM can
+                // pop a browser window or block on a tty read on first use.
+                ["GCM_INTERACTIVE"] = "never",
+                ["GIT_TERMINAL_PROMPT"] = "0",
+            },
+            timeoutLogContext: $"GCM credential lookup for {host}",
+            errorLogContext: $"GCM credential lookup for {host}");
+
+        if (result == null || result.ExitCode != 0) return null;
+
+        foreach (var line in result.Stdout.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("password=", StringComparison.Ordinal))
+                return trimmed[9..];
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Result of a credential-resolution subprocess invocation. <c>null</c>
+    /// return from <see cref="RunCredentialSubprocess"/> means the process
+    /// either timed out (and was killed) or failed to start / threw.
+    /// </summary>
+    internal sealed record CredentialSubprocessResult(int ExitCode, string Stdout, string Stderr);
+
+    /// <summary>
+    /// Run a short-lived credential-resolution subprocess (az CLI, git
+    /// credential, etc.) with a hard wall-clock timeout, draining stdout
+    /// and stderr concurrently to avoid pipe-buffer-fill deadlocks. On
+    /// timeout the entire process tree is killed and <c>null</c> is
+    /// returned; the timeout is logged with the supplied
+    /// <paramref name="timeoutLogContext"/> (defaults to a generic message
+    /// when not supplied).
+    ///
+    /// Returns <c>null</c> on:
+    ///   - <see cref="Process.Start(ProcessStartInfo)"/> returning null
+    ///     (process couldn't be launched, e.g. file-not-found),
+    ///   - timeout exceeded (process killed; stderr/stdout content is lost
+    ///     and not surfaced — the caller can only know it timed out),
+    ///   - any exception thrown by the subprocess machinery (logged with
+    ///     the supplied <paramref name="errorLogContext"/>).
+    ///
+    /// Otherwise returns a populated result regardless of exit code.
+    ///
+    /// Exposed as <c>internal static</c> so tests can drive the
+    /// timeout-and-kill path with controlled commands (e.g. a long-running
+    /// <c>ping</c> against a short timeout) without depending on whether
+    /// <c>az</c> / <c>git</c> are installed in the test environment.
+    /// </summary>
+    internal static CredentialSubprocessResult? RunCredentialSubprocess(
+        string fileName, string arguments, int timeoutMs,
+        Action<StreamWriter>? writeInput = null,
+        IDictionary<string, string>? environment = null,
+        string? timeoutLogContext = null,
+        string? errorLogContext = null)
+    {
         try
         {
-            // On Windows, 'az' is az.cmd — must invoke via cmd.exe
-            var isWindows = OperatingSystem.IsWindows();
-            var fileName = isWindows ? "cmd.exe" : "az";
-            var arguments = isWindows
-                ? "/c az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv"
-                : "account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv";
             var psi = new ProcessStartInfo(fileName, arguments)
             {
                 // RedirectStandardInput prevents the child from inheriting the
@@ -923,90 +1013,59 @@ public sealed class AdoCiProvider : ICiProvider
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            if (environment != null)
+            {
+                foreach (var (k, v) in environment) psi.Environment[k] = v;
+            }
+
             using var proc = Process.Start(psi);
             if (proc == null) return null;
 
-            // Close stdin immediately so any read attempt sees EOF.
-            proc.StandardInput.Close();
-
-            // Drain stderr concurrently with stdout. Without this, a chatty
-            // subprocess can fill the stderr pipe buffer (~4 KB on Windows)
-            // and block on write, while we block reading stdout.
-            var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
-            var stdoutTask = Task.Run(() => proc.StandardOutput.ReadToEnd());
-
-            if (!proc.WaitForExit(10_000))
+            // Once Process.Start succeeds, we own the child process. Any
+            // exception in the post-start logic must kill the process tree
+            // before propagating so we don't orphan a running subprocess.
+            try
             {
-                try { proc.Kill(entireProcessTree: true); } catch { }
-                Console.Error.WriteLine("ci-debug-mcp: az CLI token retrieval timed out");
-                return null;
+                // Write stdin (if requested) then close so any read attempt sees EOF.
+                if (writeInput != null) writeInput(proc.StandardInput);
+                proc.StandardInput.Close();
+
+                // Drain stderr concurrently with stdout. Without this, a chatty
+                // subprocess can fill the stderr pipe buffer (~4 KB on Windows)
+                // and block on write, while we block reading stdout.
+                var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
+                var stdoutTask = Task.Run(() => proc.StandardOutput.ReadToEnd());
+
+                if (!proc.WaitForExit(timeoutMs))
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                    Console.Error.WriteLine(
+                        $"ci-debug-mcp: {timeoutLogContext ?? "credential subprocess"} timed out");
+                    return null;
+                }
+
+                // After WaitForExit, stdout/stderr have been closed so the drain
+                // tasks complete promptly.
+                var stdout = stdoutTask.GetAwaiter().GetResult();
+                var stderr = stderrTask.GetAwaiter().GetResult();
+
+                return new CredentialSubprocessResult(proc.ExitCode, stdout, stderr);
             }
-
-            // After WaitForExit, stdout/stderr have been closed so the drain
-            // tasks complete promptly.
-            var token = stdoutTask.GetAwaiter().GetResult().Trim();
-            _ = stderrTask.GetAwaiter().GetResult();
-
-            return proc.ExitCode == 0 && token.Length > 0 ? token : null;
+            catch
+            {
+                // Failure after Process.Start succeeded — kill the process
+                // tree before letting the outer try/catch log + return null,
+                // so we don't leak a running subprocess.
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                throw;
+            }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"ci-debug-mcp: az CLI token retrieval failed: {ex.Message}");
+            Console.Error.WriteLine(
+                $"ci-debug-mcp: {errorLogContext ?? "credential subprocess"} failed: {ex.Message}");
             return null;
         }
-    }
-
-    private static string? GetTokenFromGcm(string host)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo("git", "credential fill")
-            {
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            // Prevent UI prompts and terminal prompts — fail fast if GCM can't
-            // resolve non-interactively. Without these, GCM can pop a browser
-            // window or block on a tty read on first use.
-            psi.Environment["GCM_INTERACTIVE"] = "never";
-            psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
-
-            using var proc = Process.Start(psi);
-            if (proc == null) return null;
-            proc.StandardInput.Write($"protocol=https\nhost={host}\n\n");
-            proc.StandardInput.Close();
-
-            // Drain stderr concurrently to avoid pipe-buffer-fills deadlocks.
-            var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
-            var stdoutTask = Task.Run(() => proc.StandardOutput.ReadToEnd());
-
-            if (!proc.WaitForExit(5_000))
-            {
-                try { proc.Kill(entireProcessTree: true); } catch { }
-                Console.Error.WriteLine($"ci-debug-mcp: GCM credential lookup for {host} timed out");
-                return null;
-            }
-
-            var output = stdoutTask.GetAwaiter().GetResult();
-            _ = stderrTask.GetAwaiter().GetResult();
-
-            if (proc.ExitCode != 0) return null;
-
-            foreach (var line in output.Split('\n'))
-            {
-                var trimmed = line.Trim();
-                if (trimmed.StartsWith("password=", StringComparison.Ordinal))
-                    return trimmed[9..];
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"ci-debug-mcp: GCM credential lookup for {host} failed: {ex.Message}");
-        }
-        return null;
     }
 
     private async Task<JsonNode?> GetJsonAsync(string path)
