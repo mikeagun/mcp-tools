@@ -1,6 +1,7 @@
 // Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using HyperVMcp.Engine;
 using HyperVMcp.Tools;
@@ -556,5 +557,79 @@ public class SnapshotToJsonTests
             status: CommandStatus.Running, exitCode: 0);
         var json = HyperVMcp.Tools.CommandTools.SnapshotToJson(snapshot);
         Assert.Contains("Poll with", json["hint"]?.GetValue<string>() ?? "");
+    }
+}
+
+public class CredentialStoreTests
+{
+    [Fact]
+    public void GetCredential_ExplicitCredentials_ReturnsMatchingPSCredential()
+    {
+        var store = new CredentialStore();
+
+        var cred = store.GetCredential(target: "ignored", username: "Administrator", password: "P@ss w0rd!");
+
+        Assert.Equal("Administrator", cred.UserName);
+        Assert.Equal("P@ss w0rd!", cred.GetNetworkCredential().Password);
+    }
+
+    [Fact]
+    public void GetCredential_MissingTarget_ThrowsCleanError()
+    {
+        var store = new CredentialStore();
+        var target = "HYPERVMCP_TEST_MISSING_" + Guid.NewGuid().ToString("N");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => store.GetCredential(target));
+
+        // Error must name the target and point the user at cmdkey.
+        Assert.Contains(target, ex.Message);
+        Assert.Contains("cmdkey", ex.Message);
+        // Error wording must NOT contain substrings that SessionManager.IsTransientError
+        // matches, to avoid triggering pointless connect retries if the resolution call
+        // is ever moved into the retry loop.
+        Assert.DoesNotContain("PSSession was not created", ex.Message);
+        Assert.DoesNotContain("no error details available", ex.Message);
+    }
+
+    [Fact]
+    public void GetCredential_StoredTarget_ResolvesAndCachesSameInstance()
+    {
+        // Store a Generic credential using the same `cmdkey` workflow the README
+        // documents, then verify CredentialStore reads it back via the native
+        // CredRead path and caches the resolved instance.
+        var target = "HYPERVMCP_TEST_" + Guid.NewGuid().ToString("N");
+        Assert.True(CmdKey($"/generic:{target} /user:Administrator /pass:S3cret!pw"),
+            "cmdkey failed to store the test credential");
+        try
+        {
+            var store = new CredentialStore();
+
+            var first = store.GetCredential(target);
+            Assert.Equal("Administrator", first.UserName);
+            Assert.Equal("S3cret!pw", first.GetNetworkCredential().Password);
+
+            // Second lookup of the same target must hit the cache and return the same instance.
+            var second = store.GetCredential(target);
+            Assert.Same(first, second);
+        }
+        finally
+        {
+            CmdKey($"/delete:{target}");
+        }
+    }
+
+    private static bool CmdKey(string arguments)
+    {
+        var psi = new ProcessStartInfo("cmdkey", arguments)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        using var proc = Process.Start(psi);
+        if (proc is null) return false;
+        proc.WaitForExit();
+        return proc.ExitCode == 0;
     }
 }

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 using System.Management.Automation;
-using System.Management.Automation.Runspaces;
 
 namespace HyperVMcp.Engine;
 
@@ -60,37 +59,20 @@ public sealed class CredentialStore
 
     private static PSCredential ResolveFromCredentialManager(string target)
     {
-        // Use a fresh runspace to call Get-StoredCredential.
-        using var ps = PowerShell.Create();
+        // Read a Generic credential directly from the Windows Credential Manager
+        // via the native CredRead API (no PowerShell module dependency).
+        var stored = Win32CredentialManager.Read(target);
 
-        // First try the CredentialManager module.
-        ps.AddScript($@"
-            $ErrorActionPreference = 'Stop'
-            try {{
-                Import-Module CredentialManager -ErrorAction Stop
-                $c = Get-StoredCredential -Target '{PsUtils.PsEscape(target)}' -ErrorAction Stop
-                if ($null -eq $c) {{ throw 'Credential not found' }}
-                $c
-            }} catch {{
-                # Fall back to cmdkey-based resolution.
-                throw ""Could not resolve credential for target '{PsUtils.PsEscape(target)}'. Ensure 'Install-Module CredentialManager' has been run and 'New-StoredCredential -Target {PsUtils.PsEscape(target)}' has been set. Error: $_""
-            }}
-        ");
-
-        var results = ps.Invoke();
-
-        if (ps.HadErrors || results.Count == 0)
+        if (stored is null || string.IsNullOrEmpty(stored.UserName))
         {
-            var errors = string.Join("; ", ps.Streams.Error.Select(e => e.ToString()));
             throw new InvalidOperationException(
-                $"Failed to resolve credential for target '{target}': {errors}");
+                $"Credential target '{target}' not found in Windows Credential Manager. " +
+                $"Store it as a Generic credential, e.g.: cmdkey /generic:<target> /user:<username> /pass:<password>");
         }
 
-        var credObj = results[0].BaseObject;
-        if (credObj is PSCredential psCred)
-            return psCred;
-
-        throw new InvalidOperationException(
-            $"Credential Manager returned unexpected type '{credObj?.GetType().Name}' for target '{target}'.");
+        var secPass = new System.Security.SecureString();
+        foreach (var c in stored.Password ?? string.Empty) secPass.AppendChar(c);
+        secPass.MakeReadOnly();
+        return new PSCredential(stored.UserName, secPass);
     }
 }
