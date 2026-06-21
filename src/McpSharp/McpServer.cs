@@ -27,9 +27,18 @@ public sealed class McpServer
 
     /// <summary>
     /// Whether the connected client advertised the elicitation capability.
-    /// Populated after the initialize handshake.
+    /// Populated after the initialize handshake. Equivalent to
+    /// <see cref="ElicitationCaps"/>.<see cref="ElicitationCapabilities.Supported"/>;
+    /// retained for backwards compatibility.
     /// </summary>
     public bool ClientSupportsElicitation { get; private set; }
+
+    /// <summary>
+    /// Parsed client elicitation capabilities (form/url modes), populated after
+    /// the initialize handshake. Used to gate features and to refuse sending a
+    /// mode the client did not advertise.
+    /// </summary>
+    public ElicitationCapabilities ElicitationCaps { get; private set; } = ElicitationCapabilities.None;
 
     public McpServer(string name, string? version = null)
     {
@@ -70,7 +79,10 @@ public sealed class McpServer
     /// <param name="timeoutSeconds">Timeout in seconds. 0 = no timeout (blocks indefinitely).</param>
     public ElicitationResult? Elicit(string message, JsonObject requestedSchema, int timeoutSeconds = 0)
     {
-        if (Transport == null || !ClientSupportsElicitation)
+        // Form mode requires the client to advertise form support.
+        // The request omits `mode` (form is the default mode); we never emit a
+        // mode the client did not declare.
+        if (Transport == null || !ElicitationCaps.Supports(ElicitationMode.Form))
             return null;
 
         var id = $"s-{Interlocked.Increment(ref _nextServerRequestId)}";
@@ -170,7 +182,8 @@ public sealed class McpServer
     {
         // Extract client capabilities.
         var clientCaps = parameters?["capabilities"];
-        ClientSupportsElicitation = clientCaps?["elicitation"] != null;
+        ElicitationCaps = ElicitationCapabilities.Parse(clientCaps?["elicitation"]);
+        ClientSupportsElicitation = ElicitationCaps.Supported;
 
         return new JsonObject
         {
@@ -231,8 +244,8 @@ public sealed class McpServer
             }
             catch (AuthenticationException authEx)
             {
-                // Try elicitation if client supports it and we haven't exhausted retries
-                if (attempt < maxAuthRetries && ClientSupportsElicitation)
+                // Try elicitation if the client advertised form support and we haven't exhausted retries
+                if (attempt < maxAuthRetries && ElicitationCaps.Supports(ElicitationMode.Form))
                 {
                     var elicitResult = Elicit(
                         $"Authentication failed ({authEx.Provider}): {authEx.Message}\n\n" +

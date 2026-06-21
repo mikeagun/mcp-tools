@@ -61,6 +61,68 @@ public sealed class ElicitationResult
 }
 
 /// <summary>
+/// Elicitation delivery mode (MCP 2025-11-25). Form mode collects structured
+/// input via a requested schema; URL mode directs the user to an out-of-band URL.
+/// </summary>
+public enum ElicitationMode
+{
+    /// <summary>Form mode — structured input matching a requested schema.</summary>
+    Form,
+    /// <summary>URL mode — out-of-band interaction at a server-provided URL.</summary>
+    Url,
+}
+
+/// <summary>
+/// Parsed client elicitation capability. Distinguishes which elicitation modes
+/// the client advertised at initialization so the server can gate features and
+/// never send a mode the client did not declare.
+/// </summary>
+public sealed class ElicitationCapabilities
+{
+    /// <summary>The client advertised the <c>elicitation</c> capability.</summary>
+    public bool Supported { get; init; }
+
+    /// <summary>The client supports form mode.</summary>
+    public bool Form { get; init; }
+
+    /// <summary>The client supports URL mode.</summary>
+    public bool Url { get; init; }
+
+    /// <summary>No elicitation capability — the client did not advertise it.</summary>
+    public static readonly ElicitationCapabilities None = new();
+
+    /// <summary>Whether the given mode was advertised by the client.</summary>
+    public bool Supports(ElicitationMode mode) => mode switch
+    {
+        ElicitationMode.Form => Form,
+        ElicitationMode.Url => Url,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Parse the client's <c>capabilities.elicitation</c> node.
+    /// Absent ⇒ unsupported. Present with no <c>form</c>/<c>url</c> keys
+    /// (e.g. an empty object) ⇒ form mode only, for backwards compatibility.
+    /// Present with explicit keys ⇒ honor exactly those modes.
+    /// </summary>
+    public static ElicitationCapabilities Parse(JsonNode? elicitationCap)
+    {
+        if (elicitationCap is null)
+            return None;
+
+        var obj = elicitationCap as JsonObject;
+        bool hasForm = obj is not null && obj.ContainsKey("form");
+        bool hasUrl = obj is not null && obj.ContainsKey("url");
+
+        // Capability present but no explicit modes ⇒ form mode only.
+        if (!hasForm && !hasUrl)
+            return new ElicitationCapabilities { Supported = true, Form = true, Url = false };
+
+        return new ElicitationCapabilities { Supported = true, Form = hasForm, Url = hasUrl };
+    }
+}
+
+/// <summary>
 /// User response action for an elicitation request.
 /// </summary>
 public enum ElicitationAction

@@ -137,7 +137,7 @@ public static class PolicyDispatch
         ApprovalPersistence persistence;
         if (matched.Persistence == null)
         {
-            var p = PromptForPersistence(server, toolName, argsSummary, matched.Label);
+            var p = PromptForPersistence(server, toolName, argsSummary, matched.Label, elicitationTimeoutSeconds);
             if (p == null)
                 return ElicitationDeniedResponse(toolName, evaluation, ElicitationAction.Cancel);
             persistence = p.Value;
@@ -165,7 +165,8 @@ public static class PolicyDispatch
     // -- Persistence prompt (Prompt 2) ----------------------------------------
 
     private static ApprovalPersistence? PromptForPersistence(
-        McpServer server, string toolName, JsonObject argsSummary, string scopeLabel)
+        McpServer server, string toolName, JsonObject argsSummary, string scopeLabel,
+        int elicitationTimeoutSeconds = 0)
     {
         var schema = new JsonObject
         {
@@ -189,7 +190,9 @@ public static class PolicyDispatch
         var context = parts.Count > 0 ? $" ({string.Join(", ", parts)})" : "";
         var message = $"Save \"{scopeLabel}\" as:{context}";
 
-        var result = server.Elicit(message, schema);
+        // Honor the configured elicitation timeout so this follow-up
+        // prompt cannot block indefinitely (previously called Elicit with no timeout).
+        var result = server.Elicit(message, schema, elicitationTimeoutSeconds);
 
         if (result == null || result.Action != ElicitationAction.Accept)
             return null;
