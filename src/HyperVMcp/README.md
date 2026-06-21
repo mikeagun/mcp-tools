@@ -30,7 +30,12 @@ cmdkey /generic:TEST_VM /user:Administrator /pass:your-password
 
 You can also use the **Credential Manager** UI (Control Panel → Credential Manager → Windows Credentials → Add a generic credential) with the target name `TEST_VM`.
 
-> The server reads this credential at runtime via the native Windows Credential Manager API — no third-party PowerShell module is required.
+Alternatively, on **Windows PowerShell 5.1** you can use the [CredentialManager](https://www.powershellgallery.com/packages/CredentialManager) module (note: its `New-StoredCredential` cmdlet does not work on PowerShell 7.x):
+
+```powershell
+Install-Module CredentialManager -Force
+New-StoredCredential -Target "TEST_VM" -UserName "Administrator" -Password "your-password"
+```
 
 ## Building
 
