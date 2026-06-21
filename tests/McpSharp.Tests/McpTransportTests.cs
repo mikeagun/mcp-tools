@@ -434,6 +434,104 @@ public class McpTransportTests
         Assert.Contains("Long document here", messages[0]!["content"]!["text"]!.GetValue<string>());
     }
 
+    // ── Server-initiated elicitation round-trip ──
+
+    [Fact]
+    public void ServerInitiatedElicitation_RoundTrip_Ndjson()
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "elic");
+
+        // Lock NDJSON framing.
+        input.Write(Encoding.UTF8.GetBytes("{\"_\":0}\n"));
+        input.Position = 0;
+        transport.ReadMessage();
+        input.SetLength(0);
+        input.Position = 0;
+        output.SetLength(0);
+        output.Position = 0;
+
+        var server = new McpServer("elic");
+        server.Transport = transport;
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["elicitation"] = new JsonObject() },
+        });
+
+        // Pre-load the client's accept response (routed via the reader thread /
+        // _responseWaiters path).
+        var resp = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject
+            {
+                ["action"] = "accept",
+                ["content"] = new JsonObject { ["v"] = "ok" },
+            },
+        };
+        input.Write(Encoding.UTF8.GetBytes(resp.ToJsonString() + "\n"));
+        input.Position = 0;
+
+        var result = server.Elicit("Pick", new JsonObject());
+
+        Assert.Equal(ElicitationAction.Accept, result!.Action);
+        Assert.Equal("ok", result.Content!["v"]!.GetValue<string>());
+
+        var sent = ParseNdjsonOutput(output);
+        Assert.Single(sent);
+        Assert.Equal("elicitation/create", sent[0]["method"]!.GetValue<string>());
+        Assert.Equal("s-1", sent[0]["id"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ServerInitiatedElicitation_RoundTrip_ContentLength()
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "elic");
+
+        // Lock Content-Length framing via a framed dummy.
+        var dummy = "{\"_\":0}";
+        var dummyBytes = Encoding.UTF8.GetBytes(dummy);
+        input.Write(Encoding.UTF8.GetBytes($"Content-Length: {dummyBytes.Length}\r\n\r\n"));
+        input.Write(dummyBytes);
+        input.Position = 0;
+        transport.ReadMessage();
+        input.SetLength(0);
+        input.Position = 0;
+        output.SetLength(0);
+        output.Position = 0;
+
+        var server = new McpServer("elic");
+        server.Transport = transport;
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["elicitation"] = new JsonObject() },
+        });
+
+        var respBody = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject { ["action"] = "accept", ["content"] = new JsonObject { ["v"] = "ok" } },
+        }.ToJsonString();
+        var rb = Encoding.UTF8.GetBytes(respBody);
+        input.Write(Encoding.UTF8.GetBytes($"Content-Length: {rb.Length}\r\n\r\n"));
+        input.Write(rb);
+        input.Position = 0;
+
+        var result = server.Elicit("Pick", new JsonObject());
+
+        Assert.Equal(ElicitationAction.Accept, result!.Action);
+        Assert.Equal("ok", result.Content!["v"]!.GetValue<string>());
+
+        var sent = ParseContentLengthOutput(output);
+        Assert.Single(sent);
+        Assert.Equal("elicitation/create", sent[0]["method"]!.GetValue<string>());
+    }
+
     // ── LogPrefix ───────────────────────────────────────────────
 
     [Fact]

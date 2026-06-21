@@ -81,8 +81,41 @@ transport.Run((method, parameters) => server.Dispatch(method, parameters));
 - `ResourceInfo` — Uri, Name, Description, MimeType, Reader
 - `PromptInfo` — Name, Description, Arguments, Handler
 - `PromptArgument` — Name, Description, Required
-- `ElicitationResult` — Action (ElicitationAction), Content (JsonObject?)
+- `ElicitationResult` — Action (ElicitationAction), Content (JsonObject?), plus typed accessors `GetString`/`GetNumber`/`GetBool`/`GetArray`/`TryGet<T>`
 - `ElicitationAction` — enum: Accept, Decline, Cancel, Timeout
+- `ElicitationCapabilities` — parsed client modes (`Supported`/`Form`/`Url`) with `Parse(JsonNode?)` and `Supports(ElicitationMode)`
+- `ElicitationMode` — enum: Form, Url
+
+## Form-Mode Elicitation (`McpSharp.Elicitation`)
+
+A typed, dependency-free layer for full form-mode elicitation (MCP `2025-11-25`),
+covering every primitive, constraint, format, default, and both enum variants.
+
+- **`FormSchemaBuilder`** — Typed construction of `requestedSchema` objects:
+  `String`/`Number`/`Boolean`/`EnumSingle`/`EnumMulti`. Emits a plain `enum` when
+  no choice has a title and `oneOf`/`anyOf` of `{ const, title }` when any does.
+  `Build()` enforces the flat-object rule (throws on nesting) and the
+  builder **refuses sensitive field names** (`password`/`token`/`api_key`/…);
+  use URL mode for credentials. `IsSensitiveFieldName(string)` exposes
+  the guard.
+- **`ElicitationPlanner`** — A pure, single-shot schema rewriter:
+  `Rewrite(DesiredField, ClientFormSupport) → PlannedField(Schema, Remap, FallbackUsed)`.
+  Handles the single-prompt degradations F1 (titles→labels), F4 (default
+  pre-population — never on a decision field), F5 (bool→Yes/No), F6 (number→string).
+  No I/O.
+- **`ElicitationDriver`** — Orchestrates the full round-trip via `McpServer.Elicit`,
+  applying the multi-round-trip degradations F2 (multi-select→booleans, recombined)
+  and F3 (re-validate-and-retry), the F8 no-prompt sentinel, and **decision-field
+  deny-safety**: an `accept` with the decision field omitted is never defaulted
+  (`DriverOutcome.DecisionMade == false`; an explicit value — even a negative one —
+  sets it true, so callers read the decision value).
+- **`FormValidator`** — Server-side validation of accepted content against the
+  requested constraints: length/pattern/format, numeric range/wholeness,
+  enum membership, and `minItems`/`maxItems`. Only constraint-bearing fields are
+  checked.
+- **`DesiredField`** / **`ClientFormSupport`** / **`EnumChoice`** / **`StringFormat`** —
+  the logical field model, client feature-support flags (used to exercise each
+  fallback rung deterministically), and supporting value types.
 
 ## Policy Framework
 
