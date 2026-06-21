@@ -22,6 +22,16 @@ Provides **25 structured tools** for VM lifecycle management, remote command exe
 
 ### Credential Setup
 
+Store the VM credential as a **Generic** credential in Windows Credential Manager using the built-in `cmdkey` tool (works on all PowerShell versions, no module required):
+
+```powershell
+cmdkey /generic:TEST_VM /user:Administrator /pass:your-password
+```
+
+You can also use the **Credential Manager** UI (Control Panel → Credential Manager → Windows Credentials → Add a generic credential) with the target name `TEST_VM`.
+
+Alternatively, on **Windows PowerShell 5.1** you can use the [CredentialManager](https://www.powershellgallery.com/packages/CredentialManager) module (note: its `New-StoredCredential` cmdlet does not work on PowerShell 7.x):
+
 ```powershell
 Install-Module CredentialManager -Force
 New-StoredCredential -Target "TEST_VM" -UserName "Administrator" -Password "your-password"
@@ -36,7 +46,7 @@ dotnet build
 ## Testing
 
 ```bash
-dotnet test    # 164 tests
+dotnet test
 ```
 
 ## Quick Start
