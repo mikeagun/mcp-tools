@@ -528,6 +528,98 @@ public class McpServerTests
         Assert.False(server.ClientSupportsElicitation);
     }
 
+    // ── Elicitation capabilities ────────────────────────────────
+
+    [Fact]
+    public void Parse_Absent_Unsupported()
+    {
+        var caps = ElicitationCapabilities.Parse(null);
+        Assert.False(caps.Supported);
+        Assert.False(caps.Form);
+        Assert.False(caps.Url);
+    }
+
+    [Fact]
+    public void Parse_EmptyObject_FormOnly()
+    {
+        // An empty object => form mode only (backwards compatibility).
+        var caps = ElicitationCapabilities.Parse(new JsonObject());
+        Assert.True(caps.Supported);
+        Assert.True(caps.Form);
+        Assert.False(caps.Url);
+    }
+
+    [Fact]
+    public void Parse_ExplicitFormAndUrl_BothModes()
+    {
+        var caps = ElicitationCapabilities.Parse(new JsonObject
+        {
+            ["form"] = new JsonObject(),
+            ["url"] = new JsonObject(),
+        });
+        Assert.True(caps.Supported);
+        Assert.True(caps.Form);
+        Assert.True(caps.Url);
+    }
+
+    [Fact]
+    public void Parse_FormOnly_FormTrueUrlFalse()
+    {
+        var caps = ElicitationCapabilities.Parse(new JsonObject { ["form"] = new JsonObject() });
+        Assert.True(caps.Supported);
+        Assert.True(caps.Form);
+        Assert.False(caps.Url);
+    }
+
+    [Fact]
+    public void Parse_UrlOnly_UrlTrueFormFalse()
+    {
+        // Explicit url-only client: form mode is NOT advertised.
+        var caps = ElicitationCapabilities.Parse(new JsonObject { ["url"] = new JsonObject() });
+        Assert.True(caps.Supported);
+        Assert.False(caps.Form);
+        Assert.True(caps.Url);
+    }
+
+    [Fact]
+    public void Supports_MapsModeToCapability()
+    {
+        var caps = ElicitationCapabilities.Parse(new JsonObject { ["url"] = new JsonObject() });
+        Assert.False(caps.Supports(ElicitationMode.Form));
+        Assert.True(caps.Supports(ElicitationMode.Url));
+    }
+
+    [Fact]
+    public void Initialize_PopulatesElicitationCaps_FormOnlyFromEmptyObject()
+    {
+        var server = CreateServer();
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["elicitation"] = new JsonObject() },
+        });
+
+        Assert.True(server.ClientSupportsElicitation);
+        Assert.True(server.ElicitationCaps.Form);
+        Assert.False(server.ElicitationCaps.Url);
+    }
+
+    [Fact]
+    public void Initialize_PopulatesElicitationCaps_UrlOnly()
+    {
+        var server = CreateServer();
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject
+            {
+                ["elicitation"] = new JsonObject { ["url"] = new JsonObject() },
+            },
+        });
+
+        Assert.True(server.ClientSupportsElicitation);
+        Assert.False(server.ElicitationCaps.Form);
+        Assert.True(server.ElicitationCaps.Url);
+    }
+
     // ── Elicitation ─────────────────────────────────────────────
 
     [Fact]
@@ -550,6 +642,62 @@ public class McpServerTests
         server.Dispatch("initialize", null);
 
         Assert.Null(server.Elicit("test", new JsonObject()));
+    }
+
+    // ── Mode guard ──────────────────────────────────────────────
+
+    [Fact]
+    public void Elicit_FormClient_NeverEmitsModeField()
+    {
+        // Form mode omits `mode` — and must never emit mode:"url".
+        var (server, input, output) = CreateServerWithTransport();
+        WriteNdjsonToStream(input, new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject { ["action"] = "accept", ["content"] = new JsonObject() },
+        }.ToJsonString());
+
+        server.Elicit("Pick one", new JsonObject());
+
+        var sent = ReadNdjsonFromStream(output);
+        Assert.Equal("elicitation/create", sent["method"]?.GetValue<string>());
+        Assert.False(sent["params"]!.AsObject().ContainsKey("mode"),
+            "form-mode requests must omit the mode field, never send mode:\"url\"");
+    }
+
+    [Fact]
+    public void Elicit_UrlOnlyClient_RefusesFormRequest_WritesNothing()
+    {
+        // A url-only client did not advertise form mode — Elicit (form) must refuse
+        // and send nothing: never provoke a -32602 from the client.
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var dummy = System.Text.Encoding.UTF8.GetBytes("{\"_\":0}\n");
+        input.Write(dummy);
+        input.Position = 0;
+        transport.ReadMessage();
+        input.SetLength(0);
+        input.Position = 0;
+        output.SetLength(0);
+        output.Position = 0;
+
+        var server = new McpServer("test-server");
+        server.Transport = transport;
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject
+            {
+                ["elicitation"] = new JsonObject { ["url"] = new JsonObject() },
+            },
+        });
+
+        var result = server.Elicit("Pick one", new JsonObject());
+
+        Assert.Null(result);
+        Assert.Equal(0, output.Length); // nothing was written to the wire
     }
 
     [Fact]

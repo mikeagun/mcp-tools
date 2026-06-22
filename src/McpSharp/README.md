@@ -62,8 +62,9 @@ transport.Run((method, parameters) => server.Dispatch(method, parameters));
 - `RegisterResource(ResourceInfo resource)` — Register a resource
 - `RegisterPrompt(PromptInfo prompt)` — Register a prompt
 - `Dispatch(string method, JsonNode? parameters)` — Handle a JSON-RPC method call
-- `Elicit(string message, JsonObject requestedSchema, int timeoutSeconds = 0)` — Send elicitation request to client. Returns `ElicitationResult?` (null if transport not set or client doesn't support elicitation). Timeout of 0 blocks indefinitely; on timeout, sends `notifications/cancelled` to the client.
-- `ClientSupportsElicitation` — Check if client declared elicitation capability
+- `Elicit(string message, JsonObject requestedSchema, int timeoutSeconds = 0)` — Send elicitation request to client. Returns `ElicitationResult?` (null if transport not set or the client did not advertise form-mode elicitation). Timeout of 0 blocks indefinitely; on timeout, sends `notifications/cancelled` to the client.
+- `ClientSupportsElicitation` — Check if client declared elicitation capability (equivalent to `ElicitationCaps.Supported`)
+- `ElicitationCaps` — Parsed `ElicitationCapabilities` describing which elicitation modes (form/url) the client advertised at `initialize`. An empty `elicitation: {}` is treated as form-mode only for backwards compatibility.
 - `Transport` — Set for bidirectional communication (required for elicitation)
 
 ### McpTransport

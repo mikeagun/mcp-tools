@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - JSON-RPC 2.0 dispatch with Content-Length and NDJSON framing auto-detection
   - Tool, resource, and prompt registry with handler pattern
   - MCP elicitation support (server-initiated prompts to the client)
+  - Elicitation capability parsing (`ElicitationCapabilities`/`ElicitationMode`): mode-aware gating so the server never sends an elicitation mode the client did not advertise
   - Concurrent dispatch mode for blocking tools
   - Policy framework (`McpSharp.Policy`): `PolicyEngine`, `PolicyDispatch`, `IToolClassifier`, `IRuleMatcher`, `IOptionGenerator`
   - Early response buffering for sequential elicitation calls
