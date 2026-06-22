@@ -58,6 +58,81 @@ public sealed class ElicitationResult
     /// User-provided data matching the requested schema. Only present when Action is Accept.
     /// </summary>
     public JsonObject? Content { get; init; }
+
+    // ── Typed accessors over Content ───────────────
+    // Convenience helpers; no behavior change to parsing.
+
+    /// <summary>Get a string field from the accepted content, or null if absent/mismatched.</summary>
+    public string? GetString(string name) => TryNode(name, out var n) ? AsString(n) : null;
+
+    /// <summary>Get a numeric field from the accepted content, or null if absent/non-numeric.</summary>
+    public double? GetNumber(string name)
+        => TryNode(name, out var n) && TryToDouble(n, out var d) ? d : null;
+
+    /// <summary>Get a boolean field from the accepted content, or null if absent/non-boolean.</summary>
+    public bool? GetBool(string name)
+    {
+        if (TryNode(name, out var n) && n is JsonValue v && v.TryGetValue<bool>(out var b))
+            return b;
+        return null;
+    }
+
+    /// <summary>
+    /// Get an array field as a list of strings from the accepted content, or null
+    /// if absent/not an array. Non-string elements are rendered via ToString.
+    /// </summary>
+    public IReadOnlyList<string>? GetArray(string name)
+    {
+        if (!TryNode(name, out var n) || n is not JsonArray arr)
+            return null;
+        var list = new List<string>(arr.Count);
+        foreach (var item in arr)
+            list.Add(AsString(item) ?? item?.ToJsonString() ?? "");
+        return list;
+    }
+
+    /// <summary>
+    /// Try to read a field from the accepted content as type <typeparamref name="T"/>.
+    /// Returns false if the field is absent or cannot be converted.
+    /// </summary>
+    public bool TryGet<T>(string name, out T value)
+    {
+        value = default!;
+        if (!TryNode(name, out var n) || n is not JsonValue v)
+            return false;
+        if (v.TryGetValue<T>(out var t))
+        {
+            value = t;
+            return true;
+        }
+        return false;
+    }
+
+    private bool TryNode(string name, out JsonNode? node)
+    {
+        node = null;
+        if (Content == null || !Content.TryGetPropertyValue(name, out node) || node == null)
+            return false;
+        return true;
+    }
+
+    private static string? AsString(JsonNode? n)
+        => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+
+    /// <summary>
+    /// Read a JSON number as a double regardless of its backing representation
+    /// (JsonElement from the wire, or a boxed int/long/decimal created in-process).
+    /// </summary>
+    internal static bool TryToDouble(JsonNode? n, out double value)
+    {
+        value = 0;
+        if (n is not JsonValue v) return false;
+        if (v.TryGetValue<double>(out value)) return true;
+        if (v.TryGetValue<long>(out var l)) { value = l; return true; }
+        if (v.TryGetValue<int>(out var i)) { value = i; return true; }
+        if (v.TryGetValue<decimal>(out var m)) { value = (double)m; return true; }
+        return false;
+    }
 }
 
 /// <summary>

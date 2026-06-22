@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Concurrent dispatch mode for blocking tools
   - Policy framework (`McpSharp.Policy`): `PolicyEngine`, `PolicyDispatch`, `IToolClassifier`, `IRuleMatcher`, `IOptionGenerator`
   - Early response buffering for sequential elicitation calls
-  - 61 tests
+  - Full form-mode elicitation engine (`McpSharp.Elicitation`, MCP `2025-11-25`): `FormSchemaBuilder` (typed primitive/enum/array construct emitters, flat-object guard, sensitive-field guard), pure single-shot `ElicitationPlanner` (F1/F4/F5/F6 rewrites), `ElicitationDriver` (F2/F3/F8 orchestration with decision-field deny-safety), `FormValidator` (server-side validation), and typed `ElicitationResult` accessors
+  - `ElicitationCapabilities` parsed at `initialize` (form/url modes; empty object = form-only) with structural mode-guarding so the server never sends a mode the client did not advertise
+  - 158 tests
 
 - **HyperVMcp** — Hyper-V VM management server (25 tools):
   - VM lifecycle: `list_vms`, `start_vm`, `stop_vm`, `restart_vm`, `checkpoint_vm`, `restore_vm`
@@ -47,3 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `publish` uses `dotnet` CLI directly (not VS MSBuild) for .NET SDK projects
   - Policy-based guardrails with MCP elicitation
   - 167 tests
+
+### Fixed
+
+- **CiDebugMcp** — The auth-failure retry elicitation now fires: the server wires `McpServer.Transport` (previously missing), so authentication failures can prompt the user instead of always falling through to the STOP error.
+- **McpSharp** — The two-prompt persistence follow-up (`PolicyDispatch`) now honors the configured elicitation timeout instead of being able to block indefinitely.
