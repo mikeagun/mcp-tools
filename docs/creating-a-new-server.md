@@ -166,3 +166,4 @@ Configure in MCP client:
 - **Simple**: CiDebugMcp — 6 tools, no policy, straightforward tool handlers
 - **With policy**: MsBuildMcp — 13 tools, build confirmation with target/config constraints
 - **Full guardrails**: HyperVMcp — 26 tools, VM-scoped policy, command analysis, risk tiers
+- **Interactive elicitation**: ElicitMcp — agent-facing decision/input/feedback tools plus a form-mode conformance harness; consumes the `McpSharp.Elicitation` form-mode engine (`FormSchemaBuilder`, `ElicitationPlanner`, `ElicitationDriver`)

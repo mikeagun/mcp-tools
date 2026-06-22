@@ -10,6 +10,7 @@ A collection of MCP (Model Context Protocol) servers and libraries for AI-assist
 | [HyperVMcp](src/HyperVMcp/README.md) | Hyper-V VM management — lifecycle, remote execution, file transfers, diagnostics |
 | [CiDebugMcp](src/CiDebugMcp/README.md) | CI/CD failure investigation — log search, failure triage, artifact downloads, binary analysis |
 | [MsBuildMcp](src/MsBuildMcp/README.md) | MSBuild project exploration — solution/project evaluation, dependency graphs, build execution |
+| [ElicitMcp](src/ElicitMcp/README.md) | MCP elicitation — agent-facing decision/input/feedback tools plus a form-mode conformance/showcase harness |
 
 ## Prerequisites
 
@@ -26,15 +27,16 @@ dotnet build
 ## Testing
 
 ```bash
-dotnet test    # 540 tests across all projects
+dotnet test    # 732 tests across all projects
 ```
 
 | Project | Tests |
 |---------|-------|
-| McpSharp | 61 |
-| HyperVMcp | 188 |
-| CiDebugMcp | 135 |
-| MsBuildMcp | 156 |
+| McpSharp | 151 |
+| HyperVMcp | 191 |
+| CiDebugMcp | 183 |
+| MsBuildMcp | 185 |
+| ElicitMcp | 22 |
 
 ## Publishing
 
@@ -44,6 +46,7 @@ Each server can be published independently:
 dotnet publish src/HyperVMcp -c Release -o publish/hyperv-mcp
 dotnet publish src/CiDebugMcp -c Release -o publish/ci-debug-mcp
 dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp
+dotnet publish src/ElicitMcp -c Release -o publish/elicit-mcp
 ```
 
 ## Repository Structure
@@ -55,12 +58,14 @@ mcp-tools/
 │   ├── McpSharp/                # Shared MCP protocol library
 │   ├── HyperVMcp/               # Hyper-V MCP server
 │   ├── CiDebugMcp/              # CI debug MCP server
-│   └── MsBuildMcp/              # MSBuild MCP server
+│   ├── MsBuildMcp/              # MSBuild MCP server
+│   └── ElicitMcp/               # Elicitation MCP server
 ├── tests/
 │   ├── McpSharp.Tests/
 │   ├── HyperVMcp.Tests/
 │   ├── CiDebugMcp.Tests/
-│   └── MsBuildMcp.Tests/
+│   ├── MsBuildMcp.Tests/
+│   └── ElicitMcp.Tests/
 ├── docs/                        # Guides (creating a new server, etc.)
 ├── .github/
 │   ├── skills/                  # Copilot skill definitions
@@ -84,6 +89,9 @@ Add servers to your MCP client configuration (e.g., `~/.copilot/mcp-config.json`
     },
     "msbuild": {
       "command": "C:\\path\\to\\publish\\msbuild-mcp\\msbuild-mcp.exe"
+    },
+    "elicit": {
+      "command": "C:\\path\\to\\publish\\elicit-mcp\\elicit-mcp.exe"
     }
   }
 }
@@ -106,6 +114,7 @@ HyperVMcp and MsBuildMcp include policy-based guardrails that require user appro
 - **HyperVMcp**: VM lifecycle, command execution, and file transfers require confirmation. Commands are analyzed against pattern lists (blocked/warned/allowed). See the [HyperVMcp guardrails docs](src/HyperVMcp/README.md#guardrails--policy).
 - **MsBuildMcp**: Build and cancel operations require confirmation with target/configuration-scoped approval. See the [MsBuildMcp guardrails docs](src/MsBuildMcp/README.md#guardrails).
 - **CiDebugMcp**: All tools are read-only and require no approval.
+- **ElicitMcp**: Interactive elicitation only (it asks the user for decisions, input, or feedback on the agent's behalf, and provides a form-mode conformance harness). It has no state-modifying operations and no guardrail layer.
 
 To disable all confirmation prompts, set `"mode": "unrestricted"` (HyperVMcp) or pre-approve all builds in the policy file (MsBuildMcp). See each server's README for details.
 

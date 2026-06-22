@@ -8,10 +8,11 @@ This repository contains a shared **MCP (Model Context Protocol)** library and t
 
 | Project | Purpose | Tests |
 |---------|---------|-------|
-| **McpSharp** (`src/McpSharp/`) | Shared MCP protocol library — JSON-RPC 2.0, tool/resource/prompt registry, elicitation, policy framework | 61 |
-| **HyperVMcp** (`src/HyperVMcp/`) | Hyper-V VM management, remote execution, file transfers, guardrails | 188 |
-| **CiDebugMcp** (`src/CiDebugMcp/`) | CI/CD failure investigation, log analysis, artifact downloads | 135 |
-| **MsBuildMcp** (`src/MsBuildMcp/`) | MSBuild solution/project evaluation, dependency graphs, builds, guardrails | 156 |
+| **McpSharp** (`src/McpSharp/`) | Shared MCP protocol library — JSON-RPC 2.0, tool/resource/prompt registry, elicitation, policy framework | 151 |
+| **HyperVMcp** (`src/HyperVMcp/`) | Hyper-V VM management, remote execution, file transfers, guardrails | 191 |
+| **CiDebugMcp** (`src/CiDebugMcp/`) | CI/CD failure investigation, log analysis, artifact downloads | 183 |
+| **MsBuildMcp** (`src/MsBuildMcp/`) | MSBuild solution/project evaluation, dependency graphs, builds, guardrails | 185 |
+| **ElicitMcp** (`src/ElicitMcp/`) | Agent-facing elicitation (decision/input) + form-mode conformance/showcase harness | 22 |
 
 **Tech stack**: C# / .NET 9 / JSON-RPC 2.0 over stdio
 
@@ -20,7 +21,7 @@ This repository contains a shared **MCP (Model Context Protocol)** library and t
 1. **[.github/copilot-instructions.md](.github/copilot-instructions.md)** — Detailed architecture, design decisions, and pitfalls for all projects
 2. **[README.md](README.md)** — Top-level overview, build/test/publish commands, configuration
 3. **[CONTRIBUTING.md](CONTRIBUTING.md)** — Development setup, code style, PR guidelines
-4. Per-project READMEs: [McpSharp](src/McpSharp/README.md), [HyperVMcp](src/HyperVMcp/README.md), [CiDebugMcp](src/CiDebugMcp/README.md), [MsBuildMcp](src/MsBuildMcp/README.md)
+4. Per-project READMEs: [McpSharp](src/McpSharp/README.md), [HyperVMcp](src/HyperVMcp/README.md), [CiDebugMcp](src/CiDebugMcp/README.md), [MsBuildMcp](src/MsBuildMcp/README.md), [ElicitMcp](src/ElicitMcp/README.md)
 
 ## Quick Start
 
@@ -63,7 +64,8 @@ McpSharp (shared library)
     ↑ project reference
     ├── HyperVMcp  (Hyper-V server)
     ├── CiDebugMcp (CI debug server)
-    └── MsBuildMcp (MSBuild server)
+    ├── MsBuildMcp (MSBuild server)
+    └── ElicitMcp  (elicitation server)
 ```
 
 Each server follows the same pattern:
