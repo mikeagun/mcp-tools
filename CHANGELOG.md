@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Policy-based guardrails with MCP elicitation
   - 167 tests
 
+- **ElicitMcp** — Dual-purpose elicitation server with a deliberately small surface:
+  - Production tools (always registered): `request_decision`, `request_input` (also covers free-text feedback), and the no-prompt `report_capabilities`
+  - Demo-mode tools (`ELICIT_MCP_DEMO_MODE=1`): a single parameterized `elicit_demo(case, simulate_caps?)` covering every construct/format/enum/action/fallback rung/safety check, plus a `run_conformance` batch runner
+  - Decision-field deny-safety and sensitive-field guard preserved; URL mode not implemented
+  - Built on the `McpSharp.Elicitation` engine; no policy/guardrail layer (interactive only)
+
 ### Fixed
 
 - **CiDebugMcp** — The auth-failure retry elicitation now fires: the server wires `McpServer.Transport` (previously missing), so authentication failures can prompt the user instead of always falling through to the STOP error.
