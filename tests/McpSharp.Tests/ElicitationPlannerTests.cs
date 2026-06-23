@@ -185,4 +185,121 @@ public class ElicitationPlannerTests
         var b = Planner.Rewrite(field, Caps());
         Assert.NotSame(a.Schema, b.Schema);
     }
+
+    // -- Multi-enum description hint ------------------------------------------
+
+    [Fact]
+    public void EnumMulti_NoDescription_NoConstraints_InjectsDefaultHint()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a"), new EnumChoice("b") },
+        };
+        var plan = Planner.Rewrite(field, Caps());
+        Assert.Equal("Select one or more", plan.Schema["description"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnumMulti_NoDescription_MinItems_InjectsMinHint()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a"), new EnumChoice("b"), new EnumChoice("c") },
+            MinItems = 2,
+        };
+        var plan = Planner.Rewrite(field, Caps());
+        Assert.Equal("Select 2 or more", plan.Schema["description"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnumMulti_NoDescription_MaxItems_InjectsMaxHint()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a"), new EnumChoice("b"), new EnumChoice("c") },
+            MaxItems = 2,
+        };
+        var plan = Planner.Rewrite(field, Caps());
+        Assert.Equal("Select up to 2", plan.Schema["description"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnumMulti_NoDescription_BothConstraints_InjectsRangeHint()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a"), new EnumChoice("b"), new EnumChoice("c"), new EnumChoice("d") },
+            MinItems = 1,
+            MaxItems = 3,
+        };
+        var plan = Planner.Rewrite(field, Caps());
+        Assert.Equal("Select 1-3", plan.Schema["description"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnumMulti_WithDescription_PreservesCallerDescription()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a"), new EnumChoice("b") },
+            Description = "Pick your favorites",
+        };
+        var plan = Planner.Rewrite(field, Caps());
+        Assert.Equal("Pick your favorites", plan.Schema["description"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnumMulti_F1TitleFallback_NoDescription_InjectsHint()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a", "Alpha"), new EnumChoice("b", "Beta") },
+        };
+        var plan = Planner.Rewrite(field, Caps(titles: false));
+        Assert.Equal("F1", plan.FallbackUsed);
+        Assert.Equal("Select one or more", plan.Schema["description"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnumMulti_TitlesSupported_NoDescription_InjectsHint()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a", "Alpha"), new EnumChoice("b", "Beta") },
+        };
+        var plan = Planner.Rewrite(field, Caps(titles: true));
+        Assert.Equal("none", plan.FallbackUsed);
+        Assert.Equal("Select one or more", plan.Schema["description"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnumMulti_DefaultAndHint_Coexist()
+    {
+        var field = new DesiredField
+        {
+            Name = "tags",
+            Kind = FieldKind.EnumMulti,
+            Choices = new[] { new EnumChoice("a"), new EnumChoice("b"), new EnumChoice("c") },
+            Default = new JsonArray("a"),
+            MinItems = 1,
+        };
+        var plan = Planner.Rewrite(field, Caps());
+        Assert.Equal("Select 1 or more", plan.Schema["description"]!.GetValue<string>());
+        Assert.NotNull(plan.Schema["default"]);
+        Assert.Equal("a", plan.Schema["default"]![0]!.GetValue<string>());
+    }
 }
