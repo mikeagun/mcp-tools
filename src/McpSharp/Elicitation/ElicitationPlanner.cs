@@ -193,6 +193,8 @@ public sealed class ElicitationPlanner
 
         var schema = new JsonObject { ["type"] = "array", ["items"] = items };
         ApplyCommon(schema, f);
+        if (f.Description == null)
+            schema["description"] = DefaultMultiEnumHint(f.MinItems, f.MaxItems);
         if (f.MinItems != null) schema["minItems"] = f.MinItems;
         if (f.MaxItems != null) schema["maxItems"] = f.MaxItems;
         if (!f.IsDecision && f.Default is JsonArray da)
@@ -273,6 +275,19 @@ public sealed class ElicitationPlanner
         if (f.Title != null) schema["title"] = f.Title;
         if (f.Description != null) schema["description"] = f.Description;
     }
+
+    /// <summary>
+    /// A human-readable selection hint used as the field <c>description</c> when the
+    /// caller supplies none, so clients always show guidance that multiple selection
+    /// is possible.
+    /// </summary>
+    internal static string DefaultMultiEnumHint(int? minItems, int? maxItems) => (minItems, maxItems) switch
+    {
+        (null, null) => "Select one or more",
+        (int min, null) => $"Select {min} or more",
+        (null, int max) => $"Select up to {max}",
+        (int min, int max) => $"Select {min}-{max}",
+    };
 
     private static void ApplyDefault(JsonObject schema, DesiredField f, JsonNode? def)
     {
