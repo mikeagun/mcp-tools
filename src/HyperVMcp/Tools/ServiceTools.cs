@@ -80,7 +80,7 @@ public static class ServiceTools
                         ["enum"] = new JsonArray("start", "stop", "restart"),
                         ["description"] = "Action: 'start', 'stop', or 'restart'.",
                     },
-                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = $"Max seconds to wait for service state change (default: 30, max {TimeoutHelper.MaxTimeoutSeconds}).", ["maximum"] = TimeoutHelper.MaxTimeoutSeconds },
+                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Max seconds to wait for service state change (default: 30)." },
                 },
                 ["required"] = new JsonArray("session_id", "name", "action"),
             },

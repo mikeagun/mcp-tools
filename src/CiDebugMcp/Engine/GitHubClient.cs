@@ -20,7 +20,7 @@ public sealed class GitHubClient : IGitHubApi
     private readonly object _authLock = new();
     private volatile bool _authResolved;
 
-    public GitHubClient(LogCache cache, int timeoutSeconds = 50)
+    public GitHubClient(LogCache cache, int timeoutSeconds = 120)
     {
         _cache = cache;
 

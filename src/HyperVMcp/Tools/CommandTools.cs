@@ -41,8 +41,7 @@ public static class CommandTools
                     ["initial_wait"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = $"Max seconds to wait for initial output (default: 30, max {TimeoutHelper.MaxTimeoutSeconds}). Command continues running in background — use get_command_status to poll.",
-                        ["maximum"] = TimeoutHelper.MaxTimeoutSeconds,
+                        ["description"] = "Max seconds to wait for initial output (default: 30). Command continues running in background — use get_command_status to poll.",
                     },
                     ["working_directory"] = new JsonObject
                     {
@@ -73,7 +72,7 @@ public static class CommandTools
             {
                 var sessionId = args["session_id"]!.GetValue<string>();
                 var command = args["command"]!.GetValue<string>();
-                var (timeout, clamped) = TimeoutHelper.ClampTimeout(args["initial_wait"]?.GetValue<int>() ?? 30);
+                var timeout = Math.Min(args["initial_wait"]?.GetValue<int>() ?? 30, int.MaxValue / 1000);
                 var workingDir = args["working_directory"]?.GetValue<string>();
                 var outputFormat = args["output_format"]?.GetValue<string>() ?? "none";
                 var hardTimeout = args["timeout"]?.GetValue<int>();
@@ -81,9 +80,7 @@ public static class CommandTools
 
                 var job = commandRunner.ExecuteWithTimeout(sessionId, command, timeout, workingDir,
                     outputFormat, hardTimeout, outputMode);
-                var json = SnapshotToJson(job.GetSnapshot());
-                if (clamped) json["timeout_clamped"] = $"Timeout capped at {TimeoutHelper.MaxTimeoutSeconds}s. Use get_command_status to continue polling.";
-                return json;
+                return SnapshotToJson(job.GetSnapshot());
             },
         });
 
@@ -107,8 +104,7 @@ public static class CommandTools
                     ["timeout"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = $"Seconds to wait for new output or completion (default: 0 = instant, max {TimeoutHelper.MaxTimeoutSeconds}). Returns early if command completes or new output arrives.",
-                        ["maximum"] = TimeoutHelper.MaxTimeoutSeconds,
+                        ["description"] = "Seconds to wait for new output or completion (default: 0 = instant). Returns early if command completes or new output arrives.",
                     },
                     ["tail_lines"] = new JsonObject
                     {
@@ -131,7 +127,7 @@ public static class CommandTools
             Handler = args =>
             {
                 var commandId = args["command_id"]!.GetValue<string>();
-                var (timeout, _) = TimeoutHelper.ClampTimeout(args["timeout"]?.GetValue<int>() ?? 0);
+                var timeout = Math.Min(args["timeout"]?.GetValue<int>() ?? 0, int.MaxValue / 1000);
                 var tailLines = args["tail_lines"]?.GetValue<int>() ?? 100;
                 var sinceLine = args["since_line"]?.GetValue<int>();
                 var includeOutput = args["include_output"]?.GetValue<bool>() ?? true;
@@ -183,7 +179,7 @@ public static class CommandTools
                     ["session_id"] = new JsonObject { ["type"] = "string", ["description"] = "Target VM session." },
                     ["script_path"] = new JsonObject { ["type"] = "string", ["description"] = "Script path on the VM." },
                     ["args"] = new JsonObject { ["type"] = "string", ["description"] = "Script arguments." },
-                    ["initial_wait"] = new JsonObject { ["type"] = "integer", ["description"] = $"Max seconds to wait for initial output (default: 30, max {TimeoutHelper.MaxTimeoutSeconds}). Script continues running — use get_command_status to poll.", ["maximum"] = TimeoutHelper.MaxTimeoutSeconds },
+                    ["initial_wait"] = new JsonObject { ["type"] = "integer", ["description"] = "Max seconds to wait for initial output (default: 30). Script continues running — use get_command_status to poll." },
                     ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Hard timeout in seconds. Backend **kills** the command after this time. Omit to let the command run indefinitely." },
                     ["working_directory"] = new JsonObject { ["type"] = "string", ["description"] = "Working directory on the VM." },
                     ["output_format"] = new JsonObject
@@ -200,7 +196,7 @@ public static class CommandTools
                 var sessionId = args["session_id"]!.GetValue<string>();
                 var scriptPath = args["script_path"]!.GetValue<string>();
                 var scriptArgs = args["args"]?.GetValue<string>() ?? "";
-                var (timeout, clamped) = TimeoutHelper.ClampTimeout(args["initial_wait"]?.GetValue<int>() ?? 30);
+                var timeout = Math.Min(args["initial_wait"]?.GetValue<int>() ?? 30, int.MaxValue / 1000);
                 var hardTimeout = args["timeout"]?.GetValue<int>();
                 var workingDir = args["working_directory"]?.GetValue<string>();
                 var outputFormat = args["output_format"]?.GetValue<string>() ?? "none";
@@ -210,9 +206,7 @@ public static class CommandTools
                     command += $" {scriptArgs}";
 
                 var job = commandRunner.ExecuteWithTimeout(sessionId, command, timeout, workingDir, outputFormat, hardTimeout);
-                var json = SnapshotToJson(job.GetSnapshot());
-                if (clamped) json["timeout_clamped"] = $"Timeout capped at {TimeoutHelper.MaxTimeoutSeconds}s. Use get_command_status to continue polling.";
-                return json;
+                return SnapshotToJson(job.GetSnapshot());
             },
         });
     }

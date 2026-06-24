@@ -9,17 +9,13 @@ namespace MsBuildMcp.Tools;
 
 public static class BuildTools
 {
-    internal const int MaxTimeoutSeconds = 45;
+    internal const int MaxSafeTimeoutSeconds = int.MaxValue / 1000;
 
     /// <summary>
-    /// Clamp timeout to MaxTimeoutSeconds. Returns the clamped value and whether clamping occurred.
+    /// Cap timeout to prevent integer overflow when multiplied by 1000.
     /// </summary>
-    internal static (int timeout, bool wasClamped) ClampTimeout(int requested)
-    {
-        if (requested > MaxTimeoutSeconds)
-            return (MaxTimeoutSeconds, true);
-        return (requested, false);
-    }
+    internal static int SafeTimeout(int requested) =>
+        Math.Min(requested, MaxSafeTimeoutSeconds);
 
     public static void Register(McpServer server, BuildManager buildManager)
     {
@@ -67,9 +63,8 @@ public static class BuildTools
                     {
                         ["type"] = "integer",
                         ["description"] = "Max seconds to wait for the build. 0 = start and return immediately. " +
-                                          "Default 30, max 45. Returns early if a new error is detected.",
+                                          "Default 30. Returns early if a new error is detected.",
                         ["default"] = 30,
-                        ["maximum"] = MaxTimeoutSeconds,
                     },
                     ["errors_from"] = new JsonObject
                     {
@@ -101,18 +96,14 @@ public static class BuildTools
                 var restore = args["restore"]?.GetValue<bool>() ?? false;
                 var additionalArgs = args["additional_args"]?.GetValue<string>();
                 var retention = args["retention"]?.GetValue<string>() ?? "full";
-                var (timeout, timeoutClamped) = ClampTimeout(args["timeout"]?.GetValue<int>() ?? 30);
+                var timeout = SafeTimeout(args["timeout"]?.GetValue<int>() ?? 30);
                 var errorsFrom = args["errors_from"]?.GetValue<int>() ?? 0;
                 var warningsFrom = args["warnings_from"]?.GetValue<int>() ?? 0;
                 var maxErrors = args["max_errors"]?.GetValue<int>() ?? 50;
 
                 var status = buildManager.StartOrPoll(slnPath, targets, config, platform,
                     restore, additionalArgs, timeout, retention: retention);
-                var json = StatusToJson(status, errorsFrom, warningsFrom, maxErrors);
-                if (timeoutClamped)
-                    json["timeout_clamped"] = $"Requested timeout exceeded max ({MaxTimeoutSeconds}s). " +
-                        "Use get_build_status to continue polling.";
-                return json;
+                return StatusToJson(status, errorsFrom, warningsFrom, maxErrors);
             },
         });
 
@@ -172,9 +163,8 @@ public static class BuildTools
                     {
                         ["type"] = "integer",
                         ["description"] = "Max seconds to wait. 0 = start and return immediately. " +
-                                          "Default 30, max 45. Returns early if a new error is detected.",
+                                          "Default 30. Returns early if a new error is detected.",
                         ["default"] = 30,
-                        ["maximum"] = MaxTimeoutSeconds,
                     },
                     ["retention"] = new JsonObject
                     {
@@ -209,15 +199,11 @@ public static class BuildTools
                 var selfContained = args["self_contained"]?.GetValue<bool>();
                 var additionalArgs = args["additional_args"]?.GetValue<string>();
                 var retention = args["retention"]?.GetValue<string>() ?? "full";
-                var (timeout, timeoutClamped) = ClampTimeout(args["timeout"]?.GetValue<int>() ?? 30);
+                var timeout = SafeTimeout(args["timeout"]?.GetValue<int>() ?? 30);
 
                 var status = buildManager.StartPublish(projectPath, config, runtime, framework,
                     output, selfContained, additionalArgs, timeout, retention);
-                var json = StatusToJson(status);
-                if (timeoutClamped)
-                    json["timeout_clamped"] = $"Requested timeout exceeded max ({MaxTimeoutSeconds}s). " +
-                        "Use get_build_status to continue polling.";
-                return json;
+                return StatusToJson(status);
             },
         });
 
@@ -242,9 +228,8 @@ public static class BuildTools
                     ["timeout"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = "Max seconds to wait for news (completion or new errors). Default 0 (instant), max 45.",
+                        ["description"] = "Max seconds to wait for news (completion or new errors). Default 0 (instant).",
                         ["default"] = 0,
-                        ["maximum"] = MaxTimeoutSeconds,
                     },
                     ["include_output"] = new JsonObject
                     {
@@ -282,7 +267,7 @@ public static class BuildTools
             Handler = args =>
             {
                 var buildId = args["build_id"]?.GetValue<string>();
-                var (timeout, timeoutClamped) = ClampTimeout(args["timeout"]?.GetValue<int>() ?? 0);
+                var timeout = SafeTimeout(args["timeout"]?.GetValue<int>() ?? 0);
                 var includeOutput = args["include_output"]?.GetValue<bool>() ?? false;
                 var outputLines = args["output_lines"]?.GetValue<int>() ?? 50;
                 var errorsFrom = args["errors_from"]?.GetValue<int>() ?? 0;
@@ -292,11 +277,7 @@ public static class BuildTools
                 var status = buildManager.GetStatus(buildId, timeout, includeOutput, outputLines);
                 if (status == null)
                     return new JsonObject { ["error"] = "No build found" };
-                var json = StatusToJson(status, errorsFrom, warningsFrom, maxErrors);
-                if (timeoutClamped)
-                    json["timeout_clamped"] = $"Requested timeout exceeded max ({MaxTimeoutSeconds}s). " +
-                        "Use get_build_status to continue polling.";
-                return json;
+                return StatusToJson(status, errorsFrom, warningsFrom, maxErrors);
             },
         });
 

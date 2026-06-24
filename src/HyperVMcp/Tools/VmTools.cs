@@ -63,7 +63,7 @@ public static class VmTools
             {
                 var names = ParseVmNames(args);
                 var wait = args["wait_for_ready"]?.GetValue<bool>() ?? true;
-                var (timeout, clamped) = TimeoutHelper.ClampTimeout(args["timeout"]?.GetValue<int>() ?? 45);
+                var timeout = Math.Min(args["timeout"]?.GetValue<int>() ?? 45, int.MaxValue / 1000);
                 var results = vmManager.StartVmsAsync(names, wait, timeout).GetAwaiter().GetResult();
                 var json = ResultsToJson(results);
                 if (results.Any(r => r.Success))
@@ -71,7 +71,6 @@ public static class VmTools
                     var vmName = results.First(r => r.Success).VmName;
                     json["hint"] = $"Use connect_vm(vm_name='{vmName}') to establish a session.";
                 }
-                if (clamped) json["timeout_clamped"] = $"Timeout capped at {TimeoutHelper.MaxTimeoutSeconds}s.";
                 return json;
             },
         });
@@ -115,7 +114,7 @@ public static class VmTools
                 {
                     ["vm_name"] = VmNameSchema(),
                     ["wait_for_ready"] = new JsonObject { ["type"] = "boolean", ["description"] = "Wait for heartbeat + PS remoting (default: true)." },
-                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = $"Max seconds to wait for VM ready (default: 45, max {TimeoutHelper.MaxTimeoutSeconds}).", ["maximum"] = TimeoutHelper.MaxTimeoutSeconds },
+                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Max seconds to wait for VM ready (default: 45)." },
                     ["session_id"] = new JsonObject { ["type"] = "string", ["description"] = "Session to reconnect after restart." },
                 },
                 ["required"] = new JsonArray("vm_name"),
@@ -124,7 +123,7 @@ public static class VmTools
             {
                 var names = ParseVmNames(args);
                 var wait = args["wait_for_ready"]?.GetValue<bool>() ?? true;
-                var (timeout, clamped) = TimeoutHelper.ClampTimeout(args["timeout"]?.GetValue<int>() ?? 45);
+                var timeout = Math.Min(args["timeout"]?.GetValue<int>() ?? 45, int.MaxValue / 1000);
                 var results = vmManager.RestartVmsAsync(names, wait, timeout).GetAwaiter().GetResult();
 
                 // Reconnect session if requested.
@@ -148,7 +147,6 @@ public static class VmTools
                 var result = ResultsToJson(results);
                 if (sessionId != null)
                     result!["session_reconnected"] = sessionId;
-                if (clamped) result!["timeout_clamped"] = $"Timeout capped at {TimeoutHelper.MaxTimeoutSeconds}s.";
                 return result;
             },
         });
@@ -194,7 +192,7 @@ public static class VmTools
                     ["vm_name"] = VmNameSchema(),
                     ["checkpoint_name"] = new JsonObject { ["type"] = "string", ["description"] = "Checkpoint name (default: 'baseline')." },
                     ["wait_for_ready"] = new JsonObject { ["type"] = "boolean", ["description"] = "Wait for heartbeat + PS remoting (default: true)." },
-                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = $"Max seconds to wait for VM ready (default: 45, max {TimeoutHelper.MaxTimeoutSeconds}).", ["maximum"] = TimeoutHelper.MaxTimeoutSeconds },
+                    ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Max seconds to wait for VM ready (default: 45)." },
                     ["session_id"] = new JsonObject { ["type"] = "string", ["description"] = "Session to reconnect after restore." },
                 },
                 ["required"] = new JsonArray("vm_name"),
@@ -204,7 +202,7 @@ public static class VmTools
                 var names = ParseVmNames(args);
                 var checkpointName = args["checkpoint_name"]?.GetValue<string>() ?? "baseline";
                 var wait = args["wait_for_ready"]?.GetValue<bool>() ?? true;
-                var (timeout, clamped) = TimeoutHelper.ClampTimeout(args["timeout"]?.GetValue<int>() ?? 45);
+                var timeout = Math.Min(args["timeout"]?.GetValue<int>() ?? 45, int.MaxValue / 1000);
                 var results = vmManager.RestoreVmsAsync(names, checkpointName, wait, timeout).GetAwaiter().GetResult();
 
                 // Reconnect session if requested.
@@ -228,7 +226,6 @@ public static class VmTools
                 var result = ResultsToJson(results);
                 if (sessionId != null)
                     result!["session_reconnected"] = sessionId;
-                if (clamped) result!["timeout_clamped"] = $"Timeout capped at {TimeoutHelper.MaxTimeoutSeconds}s.";
                 return result;
             },
         });
@@ -262,7 +259,7 @@ public static class VmTools
         {
             ["vm_name"] = VmNameSchema(),
             ["wait_for_ready"] = new JsonObject { ["type"] = "boolean", ["description"] = "Wait for heartbeat + PS remoting (default: true)." },
-            ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = $"Max seconds to wait for VM ready (default: 45, max {TimeoutHelper.MaxTimeoutSeconds}). If VM isn't ready, use get_vm_info to check status.", ["maximum"] = TimeoutHelper.MaxTimeoutSeconds },
+            ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Max seconds to wait for VM ready (default: 45). If VM isn't ready, use get_vm_info to check status." },
         },
         ["required"] = new JsonArray("vm_name"),
     };

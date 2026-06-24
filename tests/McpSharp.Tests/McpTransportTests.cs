@@ -564,4 +564,203 @@ public class McpTransportTests
         var responses = ParseNdjsonOutput(output);
         Assert.Single(responses);
     }
+
+    // ── Progress keepalive ──────────────────────────────────────
+
+    [Fact]
+    public void SendProgress_EmitsValidNotification()
+    {
+        var input = new MemoryStream(); // empty — no reading needed
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.SendProgress(JsonValue.Create("tok-1"), 1);
+
+        var messages = ParseContentLengthOutput(output);
+        Assert.Single(messages);
+        var msg = messages[0];
+        Assert.Equal("2.0", msg["jsonrpc"]!.GetValue<string>());
+        Assert.Equal("notifications/progress", msg["method"]!.GetValue<string>());
+        Assert.False(msg.AsObject().ContainsKey("id")); // notification — no id
+        Assert.Equal("tok-1", msg["params"]!["progressToken"]!.GetValue<string>());
+        Assert.Equal(1, msg["params"]!["progress"]!.GetValue<long>());
+    }
+
+    [Fact]
+    public void SendProgress_IncludesOptionalFields()
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.SendProgress(JsonValue.Create("tok-2"), 5, total: 10, message: "halfway");
+
+        var messages = ParseContentLengthOutput(output);
+        Assert.Single(messages);
+        var p = messages[0]["params"]!;
+        Assert.Equal(5, p["progress"]!.GetValue<long>());
+        Assert.Equal(10, p["total"]!.GetValue<long>());
+        Assert.Equal("halfway", p["message"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void SendProgress_OmitsNullOptionalFields()
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.SendProgress(JsonValue.Create("tok-3"), 2);
+
+        var messages = ParseContentLengthOutput(output);
+        var p = messages[0]["params"]!.AsObject();
+        Assert.False(p.ContainsKey("total"));
+        Assert.False(p.ContainsKey("message"));
+    }
+
+    [Fact]
+    public void SendProgress_PreservesNumericToken()
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.SendProgress(JsonValue.Create(42), 1);
+
+        var messages = ParseContentLengthOutput(output);
+        var p = messages[0]["params"]!;
+        Assert.Equal(42, p["progressToken"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void Keepalive_EmitsProgressForSlowToolCall()
+    {
+        // Simulate a tools/call with _meta.progressToken and a slow handler.
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["_meta"] = new JsonObject { ["progressToken"] = "keep-1" },
+                ["name"] = "slow_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var server = new McpServer("test");
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "slow_tool",
+            Description = "A slow tool for testing keepalive",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ =>
+            {
+                Thread.Sleep(12_000); // >10s triggers keepalive
+                return new JsonObject { ["done"] = true };
+            },
+        });
+        server.Transport = transport;
+
+        transport.Run((method, parameters) => server.Dispatch(method, parameters));
+
+        var messages = ParseNdjsonOutput(output);
+        // Should have at least 1 progress notification + 1 final response
+        Assert.True(messages.Count >= 2,
+            $"Expected at least 2 messages (progress + response), got {messages.Count}");
+
+        // Find progress notifications
+        var progressMsgs = messages.Where(m =>
+            m["method"]?.GetValue<string>() == "notifications/progress").ToList();
+        Assert.True(progressMsgs.Count >= 1, "Expected at least one progress notification");
+
+        var firstProgress = progressMsgs[0]["params"]!;
+        Assert.Equal("keep-1", firstProgress["progressToken"]!.GetValue<string>());
+        Assert.Equal(1, firstProgress["progress"]!.GetValue<long>());
+
+        // Final response should be a successful tool result
+        var response = messages.Last(m => m.AsObject().ContainsKey("id"));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+        Assert.NotNull(response["result"]);
+    }
+
+    [Fact]
+    public void Keepalive_DoesNotEmitWithoutProgressToken()
+    {
+        // tools/call without _meta.progressToken — no keepalive
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["name"] = "slow_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var server = new McpServer("test");
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "slow_tool",
+            Description = "A slow tool",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ =>
+            {
+                Thread.Sleep(100); // short — no keepalive should fire
+                return new JsonObject { ["done"] = true };
+            },
+        });
+        server.Transport = transport;
+
+        transport.Run((method, parameters) => server.Dispatch(method, parameters));
+
+        var messages = ParseNdjsonOutput(output);
+        // Only the response, no progress notifications
+        Assert.Single(messages);
+        Assert.Equal(1, messages[0]["id"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void Keepalive_StopsOnHandlerError()
+    {
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["_meta"] = new JsonObject { ["progressToken"] = "err-1" },
+                ["name"] = "failing_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((method, parameters) =>
+        {
+            Thread.Sleep(11_000); // triggers one keepalive tick
+            throw new Exception("handler failed");
+        });
+
+        var messages = ParseNdjsonOutput(output);
+        // Should have progress notification(s) + error response
+        var errorResponse = messages.Last(m => m.AsObject().ContainsKey("error"));
+        Assert.NotNull(errorResponse);
+        Assert.Equal(-32603, errorResponse["error"]!["code"]!.GetValue<int>());
+
+        // Timer should have been disposed — no further messages after error
+        // (can't easily test absence of future messages, but at least verify it didn't crash)
+    }
 }

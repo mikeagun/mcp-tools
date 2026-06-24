@@ -173,17 +173,15 @@ public class BuildToolsTests
     }
 
     [Theory]
-    [InlineData(30, 30, false)]
-    [InlineData(45, 45, false)]
-    [InlineData(46, 45, true)]
-    [InlineData(120, 45, true)]
-    [InlineData(0, 0, false)]
-    public void ClampTimeout_ClampsAboveMax(int requested, int expectedTimeout, bool expectedClamped)
+    [InlineData(30, 30)]
+    [InlineData(45, 45)]
+    [InlineData(120, 120)]
+    [InlineData(0, 0)]
+    [InlineData(int.MaxValue, int.MaxValue / 1000)]
+    public void SafeTimeout_CapsAtOverflowBoundary(int requested, int expected)
     {
-        var (timeout, wasClamped) = BuildTools.ClampTimeout(requested);
-
-        Assert.Equal(expectedTimeout, timeout);
-        Assert.Equal(expectedClamped, wasClamped);
+        var timeout = BuildTools.SafeTimeout(requested);
+        Assert.Equal(expected, timeout);
     }
 }
 
