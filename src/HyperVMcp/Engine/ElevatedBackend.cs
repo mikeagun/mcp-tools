@@ -50,9 +50,10 @@ public sealed class ElevatedBackend : IDisposable
 
     /// <summary>
     /// Default timeout for sync Execute() calls, in milliseconds.
-    /// Should be less than the MCP protocol timeout to ensure responses arrive in time.
+    /// 0 = no timeout (blocks until the backend responds). Progress keepalive
+    /// prevents the MCP client from timing out during long operations.
     /// </summary>
-    public int DefaultTimeoutMs { get; set; } = 50_000;
+    public int DefaultTimeoutMs { get; set; } = 0;
 
     private sealed record StreamHandler(Action<string, string> OnLine, Action<string, bool> OnComplete);
 
@@ -76,8 +77,8 @@ public sealed class ElevatedBackend : IDisposable
 
     /// <summary>
     /// Execute a PowerShell script synchronously. Returns a JSON result object.
-    /// On timeout, returns a structured error instead of throwing, ensuring the
-    /// MCP response arrives before the protocol timeout expires.
+    /// When timeout is 0, blocks indefinitely until the backend responds.
+    /// On timeout (when > 0), returns a structured error.
     /// </summary>
     public JsonObject Execute(string script, int? timeoutMs = null)
     {
@@ -96,7 +97,11 @@ public sealed class ElevatedBackend : IDisposable
                 ["script"] = script,
             });
 
-            if (!tcs.Task.Wait(effectiveTimeout))
+            if (effectiveTimeout <= 0)
+            {
+                tcs.Task.Wait();
+            }
+            else if (!tcs.Task.Wait(effectiveTimeout))
             {
                 _pending.TryRemove(reqId, out _);
                 return new JsonObject

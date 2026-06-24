@@ -14,7 +14,7 @@ namespace ElicitMcp.Tools;
 /// </summary>
 internal static class ElicitHelpers
 {
-    internal const int DefaultTimeoutSeconds = 120;
+    internal const int DefaultTimeoutSeconds = 0;
 
     /// <summary>
     /// Resolve client form support. When the caller passes <c>simulate_caps</c>, the

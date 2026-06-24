@@ -205,9 +205,37 @@ public sealed class McpTransport
     private void DispatchAndRespond(Func<string, JsonNode?, JsonNode?> handler,
         string method, JsonNode? parameters, bool isNotification, string? idJson)
     {
+        // Progress keepalive: if this is a tools/call with a progressToken,
+        // emit periodic notifications/progress to reset the client's timeout clock.
+        // The MCP spec defines progressToken as string | integer.
+        JsonNode? progressTokenNode = null;
+        if (method == "tools/call")
+            progressTokenNode = parameters?["_meta"]?["progressToken"];
+
+        long progressCounter = 0;
+        int keepaliveStopped = 0;
+        Timer? keepaliveTimer = null;
+
+        if (progressTokenNode != null)
+        {
+            keepaliveTimer = new Timer(_ =>
+            {
+                if (Volatile.Read(ref keepaliveStopped) != 0) return;
+                var count = Interlocked.Increment(ref progressCounter);
+                try { SendProgress(progressTokenNode, count, message: "Still working…"); }
+                catch { /* transport may be closed */ }
+            }, null, 10_000, 15_000);
+        }
+
         try
         {
             var result = handler(method, parameters);
+
+            // Stop keepalive and drain any in-flight callback before sending
+            // the response — ensures no progress arrives after the result.
+            Interlocked.Exchange(ref keepaliveStopped, 1);
+            DrainTimer(ref keepaliveTimer);
+
             if (!isNotification)
             {
                 var response = new JsonObject
@@ -223,6 +251,9 @@ public sealed class McpTransport
         }
         catch (Exception ex)
         {
+            Interlocked.Exchange(ref keepaliveStopped, 1);
+            DrainTimer(ref keepaliveTimer);
+
             if (!isNotification)
             {
                 var errorResponse = new JsonObject
@@ -242,6 +273,51 @@ public sealed class McpTransport
                 Console.Error.WriteLine($"{_logPrefix}: notification error: {ex.Message}");
             }
         }
+        finally
+        {
+            if (progressTokenNode != null && progressCounter > 0)
+                Console.Error.WriteLine($"{_logPrefix}: progress keepalive sent {progressCounter} notifications");
+        }
+    }
+
+    /// <summary>
+    /// Dispose a timer and wait for any in-flight callback to complete.
+    /// Sets the reference to null to prevent double-dispose.
+    /// </summary>
+    private static void DrainTimer(ref Timer? timer)
+    {
+        if (timer == null) return;
+        using var drained = new ManualResetEvent(false);
+        timer.Dispose(drained);
+        drained.WaitOne();
+        timer = null;
+    }
+
+    // ── Progress notifications ──────────────────────────────────
+
+    /// <summary>
+    /// Send a progress notification to the client. The progress value must
+    /// increase monotonically across calls for the same progressToken.
+    /// The token is echoed back in its original JSON type (string or integer).
+    /// </summary>
+    public void SendProgress(JsonNode progressToken, long progress, long? total = null, string? message = null)
+    {
+        var param = new JsonObject
+        {
+            ["progressToken"] = JsonNode.Parse(progressToken.ToJsonString()),
+            ["progress"] = progress,
+        };
+        if (total.HasValue)
+            param["total"] = total.Value;
+        if (message != null)
+            param["message"] = message;
+
+        WriteMessage(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["method"] = "notifications/progress",
+            ["params"] = param,
+        });
     }
 
     // ── Stream reading (used by reader thread) ──────────────────

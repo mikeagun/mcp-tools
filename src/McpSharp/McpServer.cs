@@ -264,7 +264,7 @@ public sealed class McpServer
                                 },
                             },
                         },
-                        timeoutSeconds: 120);
+                        timeoutSeconds: 0);
 
                     if (elicitResult?.Action == ElicitationAction.Accept)
                     {

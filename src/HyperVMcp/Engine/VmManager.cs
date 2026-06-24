@@ -219,7 +219,7 @@ public sealed class VmManager
 
     private void WaitForVmReady(string vmName, int timeoutSeconds)
     {
-        var effectiveTimeout = Math.Min(timeoutSeconds, 60);
+        var effectiveTimeout = Math.Min(timeoutSeconds, 180);
         var deadline = DateTime.UtcNow.AddSeconds(effectiveTimeout);
 
         while (DateTime.UtcNow < deadline)

@@ -43,15 +43,15 @@ public sealed class HyperVPolicyConfig : McpSharp.Policy.PolicyConfig
     public bool ApproveFlagMode { get; set; }
 
     [JsonPropertyName("confirmation_timeout_seconds")]
-    public int ConfirmationTimeoutSeconds { get; set; } = 175;
+    public int ConfirmationTimeoutSeconds { get; set; } = 0;
 
     /// <summary>
     /// Maximum time (in seconds) for a sync backend operation to complete before
-    /// the server returns a timeout error to the agent. Must be less than the MCP
-    /// protocol timeout (typically 60s) to ensure the response arrives in time.
+    /// the server returns a timeout error to the agent. 0 = no timeout (blocks
+    /// until complete). Progress keepalive prevents the MCP client from timing out.
     /// </summary>
     [JsonPropertyName("backend_timeout_seconds")]
-    public int BackendTimeoutSeconds { get; set; } = 50;
+    public int BackendTimeoutSeconds { get; set; } = 0;
 
     // ── Safe defaults ──────────────────────────────────────────────────
 

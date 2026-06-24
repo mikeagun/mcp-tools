@@ -42,8 +42,7 @@ public static class FileTools
                     ["initial_wait"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = $"Max seconds to wait for initial progress (default: 30, max {TimeoutHelper.MaxTimeoutSeconds}). Transfer continues in background — use get_command_status to poll.",
-                        ["maximum"] = TimeoutHelper.MaxTimeoutSeconds,
+                        ["description"] = "Max seconds to wait for initial progress (default: 30). Transfer continues in background — use get_command_status to poll.",
                     },
                 },
                 ["required"] = new JsonArray("session_id", "source", "destination"),
@@ -54,12 +53,10 @@ public static class FileTools
                 var sources = ParseStringOrArray(args["source"]!);
                 var destination = args["destination"]!.GetValue<string>();
                 var compress = args["compress"]?.GetValue<bool>();
-                var (timeout, clamped) = TimeoutHelper.ClampTimeout(args["initial_wait"]?.GetValue<int>() ?? 30);
+                var timeout = Math.Min(args["initial_wait"]?.GetValue<int>() ?? 30, int.MaxValue / 1000);
 
                 var job = fileTransferManager.CopyToVm(sessionId, sources, destination, compress, timeout);
-                var json = CommandTools.SnapshotToJson(job.GetSnapshot());
-                if (clamped) json["timeout_clamped"] = $"Timeout capped at {TimeoutHelper.MaxTimeoutSeconds}s. Use get_command_status to continue polling.";
-                return json;
+                return CommandTools.SnapshotToJson(job.GetSnapshot());
             },
         });
 
@@ -86,8 +83,7 @@ public static class FileTools
                     ["initial_wait"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = $"Max seconds to wait for initial progress (default: 30, max {TimeoutHelper.MaxTimeoutSeconds}). Transfer continues in background — use get_command_status to poll.",
-                        ["maximum"] = TimeoutHelper.MaxTimeoutSeconds,
+                        ["description"] = "Max seconds to wait for initial progress (default: 30). Transfer continues in background — use get_command_status to poll.",
                     },
                 },
                 ["required"] = new JsonArray("session_id", "source", "destination"),
@@ -97,12 +93,10 @@ public static class FileTools
                 var sessionId = args["session_id"]!.GetValue<string>();
                 var sources = ParseStringOrArray(args["source"]!);
                 var destination = args["destination"]!.GetValue<string>();
-                var (timeout, clamped) = TimeoutHelper.ClampTimeout(args["initial_wait"]?.GetValue<int>() ?? 30);
+                var timeout = Math.Min(args["initial_wait"]?.GetValue<int>() ?? 30, int.MaxValue / 1000);
 
                 var job = fileTransferManager.CopyFromVm(sessionId, sources, destination, timeout);
-                var json = CommandTools.SnapshotToJson(job.GetSnapshot());
-                if (clamped) json["timeout_clamped"] = $"Timeout capped at {TimeoutHelper.MaxTimeoutSeconds}s. Use get_command_status to continue polling.";
-                return json;
+                return CommandTools.SnapshotToJson(job.GetSnapshot());
             },
         });
 
