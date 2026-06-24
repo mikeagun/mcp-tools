@@ -222,6 +222,7 @@ public sealed class VmManager
         var effectiveTimeout = Math.Min(timeoutSeconds, 180);
         var deadline = DateTime.UtcNow.AddSeconds(effectiveTimeout);
 
+        // Phase 1: Wait for VM state to be Running.
         while (DateTime.UtcNow < deadline)
         {
             var state = GetVmState(vmName);
@@ -229,6 +230,7 @@ public sealed class VmManager
             Thread.Sleep(1000);
         }
 
+        // Phase 2: Wait for Heartbeat integration service to report OK.
         while (DateTime.UtcNow < deadline)
         {
             try
@@ -244,7 +246,7 @@ public sealed class VmManager
             Thread.Sleep(2000);
         }
 
-        // Enable Guest Service Interface.
+        // Enable Guest Service Interface if not already enabled.
         try
         {
             _backend.Execute($@"
@@ -256,25 +258,6 @@ public sealed class VmManager
             ");
         }
         catch { }
-
-        // Verify PowerShell Direct readiness.
-        // Heartbeat OK doesn't guarantee PSDirect is available — there's a lag.
-        // Check that the PowerShell Direct VM integration service is enabled and responding.
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                var result = _backend.Execute($@"
-                    $ps = Get-VMIntegrationService -VMName '{PsUtils.PsEscape(vmName)}' |
-                          Where-Object {{ $_.Name -eq 'PowerShell Direct' }}
-                    if ($ps -and $ps.Enabled -and $ps.PrimaryStatusDescription -eq 'OK') {{ 'ready' }}
-                ");
-                var status = GetOutputLines(result).FirstOrDefault();
-                if (status == "ready") break;
-            }
-            catch { }
-            Thread.Sleep(2000);
-        }
 
         if (DateTime.UtcNow >= deadline)
             throw new TimeoutException($"VM '{vmName}' did not become ready within {effectiveTimeout} seconds.");
