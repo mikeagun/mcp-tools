@@ -56,6 +56,31 @@ public class DownloadJobTests
         Assert.Equal(2, matches.Count);
     }
 
+    // ── Progress summary ────────────────────────────────────────
+
+    [Fact]
+    public void FormatProgress_NoBytesReturnsNull()
+    {
+        // Falls back to the generic keepalive text before any bytes arrive.
+        Assert.Null(DownloadJob.FormatProgress(bytesDownloaded: 0, totalBytes: 120 * 1024 * 1024));
+    }
+
+    [Fact]
+    public void FormatProgress_KnownTotalIncludesPercent()
+    {
+        var msg = DownloadJob.FormatProgress(
+            bytesDownloaded: 45L * 1024 * 1024,
+            totalBytes: 120L * 1024 * 1024);
+        Assert.Equal("Downloading: 45MB/120MB (37%)", msg);
+    }
+
+    [Fact]
+    public void FormatProgress_UnknownTotalOmitsPercent()
+    {
+        var msg = DownloadJob.FormatProgress(bytesDownloaded: 45L * 1024 * 1024, totalBytes: 0);
+        Assert.Equal("Downloading: 45MB", msg);
+    }
+
     // ── Extract ─────────────────────────────────────────────────
 
     [Fact]
@@ -358,6 +383,123 @@ public class DownloadJobTests
         {
             if (File.Exists(sourcePath)) File.Delete(sourcePath);
             if (File.Exists(destPath)) File.Delete(destPath);
+        }
+    }
+
+    [Fact]
+    public void WaitForCompletion_ReturnsOnCompletion()
+    {
+        // A gated handler holds the download open; WaitForCompletion must block
+        // until the completion PulseAll fires (not on intermediate pulses), then
+        // return. Mirrors WaitForNews_PulseDeliveredOnCompletion's gating pattern.
+        var sourcePath = Path.Combine(Path.GetTempPath(), $"mcptest-wc-src-{Guid.NewGuid():N}.zip");
+        var destPath = Path.Combine(Path.GetTempPath(), $"mcptest-wc-dst-{Guid.NewGuid():N}.zip");
+
+        try
+        {
+            using (var zip = System.IO.Compression.ZipFile.Open(sourcePath, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                var e = zip.CreateEntry("test.txt");
+                using var s = e.Open();
+                s.Write("content"u8);
+            }
+
+            using var releaseGate = new ManualResetEventSlim(false);
+            var handler = new GatedFileHandler(sourcePath, releaseGate);
+            var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+            var job = new DownloadJob(client, "http://localhost/fake.zip", destPath,
+                "dl-wc-test", 99997, "wc-test");
+
+            try
+            {
+                var waiterReturned = new ManualResetEventSlim(false);
+                var waiterThread = new Thread(() =>
+                {
+                    job.WaitForCompletion(90_000);
+                    waiterReturned.Set();
+                }) { IsBackground = true, Name = "wait-for-completion-test" };
+                waiterThread.Start();
+
+                Thread.Sleep(500);
+                Assert.False(job.IsCompleted, "Job should still be in-flight before gate release");
+                Assert.False(waiterReturned.IsSet, "Waiter should still be blocked before gate release");
+
+                releaseGate.Set();
+                Assert.True(waiterReturned.Wait(60_000),
+                    "WaitForCompletion did not return within 60s of gate release");
+                Assert.True(job.IsCompleted, "Job should be completed after gate release");
+
+                waiterThread.Join(5_000);
+            }
+            finally
+            {
+                job.Dispose();
+            }
+        }
+        finally
+        {
+            if (File.Exists(sourcePath)) File.Delete(sourcePath);
+            if (File.Exists(destPath)) File.Delete(destPath);
+        }
+    }
+
+    [Fact]
+    public void WaitForCompletion_TimesOutWhileRunning()
+    {
+        // With the gate never released, the download stays in-flight; a short
+        // WaitForCompletion must return at roughly the timeout, not hang.
+        var sourcePath = Path.Combine(Path.GetTempPath(), $"mcptest-wct-src-{Guid.NewGuid():N}.zip");
+        var destPath = Path.Combine(Path.GetTempPath(), $"mcptest-wct-dst-{Guid.NewGuid():N}.zip");
+
+        try
+        {
+            using (var zip = System.IO.Compression.ZipFile.Open(sourcePath, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                var e = zip.CreateEntry("test.txt");
+                using var s = e.Open();
+                s.Write("content"u8);
+            }
+
+            using var releaseGate = new ManualResetEventSlim(false); // never released
+            var handler = new GatedFileHandler(sourcePath, releaseGate);
+            var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+            var job = new DownloadJob(client, "http://localhost/fake.zip", destPath,
+                "dl-wct-test", 99996, "wct-test");
+
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                job.WaitForCompletion(200);
+                sw.Stop();
+
+                Assert.False(job.IsCompleted, "Job should still be running (gate never released)");
+                Assert.True(sw.ElapsedMilliseconds >= 150,
+                    $"WaitForCompletion should wait roughly the full timeout, waited {sw.ElapsedMilliseconds}ms");
+                Assert.True(sw.ElapsedMilliseconds < 5_000,
+                    $"WaitForCompletion should not hang past the timeout, waited {sw.ElapsedMilliseconds}ms");
+            }
+            finally
+            {
+                releaseGate.Set(); // let the download finish so teardown is clean
+                // Wait for the download to actually complete before deleting the
+                // source file — otherwise the handler may still be reading it.
+                job.WaitForCompletion(5_000);
+                job.Dispose();
+            }
+        }
+        finally
+        {
+            TryDelete(sourcePath);
+            TryDelete(destPath);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            try { if (File.Exists(path)) File.Delete(path); return; }
+            catch (IOException) { Thread.Sleep(50); }
         }
     }
 

@@ -87,9 +87,11 @@ public static class ArtifactTools
                     {
                         ["type"] = "number",
                         ["description"] = "Seconds to wait for download progress before returning " +
-                                          "(default: 30, 0 = instant status). Downloads run in background " +
-                                          "independently — they are NOT cancelled when this timeout expires. " +
-                                          "Use download_id to poll or wait longer in subsequent calls.",
+                                          "(default: 30, 0 = instant status). When polling by download_id, " +
+                                          "waits until the download completes or the timeout elapses, " +
+                                          "streaming byte progress; choose the value to control poll frequency. " +
+                                          "Downloads run in background independently — they are NOT cancelled " +
+                                          "when this timeout expires. Use download_id to poll or wait longer.",
                         ["default"] = 30,
                     },
                     ["extract"] = new JsonObject
@@ -259,10 +261,12 @@ public static class ArtifactTools
         var extractPatterns = args["extract"]?.AsArray()
             ?.Select(n => n!.GetValue<string>()).ToArray();
 
-        // Wait for progress if requested
+        // Wait for the download to finish or the timeout to elapse (poll model);
+        // byte progress streams during the wait.
         if (timeout > 0 && !job.IsCompleted)
         {
-            job.WaitForNews(timeout * 1000);
+            McpProgress.Current.SetStatusProvider(job.ProgressSummary);
+            job.WaitForCompletion(timeout * 1000);
         }
 
         var status = job.GetStatus(includeContents: true, maxContents: 30);
@@ -401,6 +405,7 @@ public static class ArtifactTools
         // Wait for initial progress
         if (timeout > 0)
         {
+            McpProgress.Current.SetStatusProvider(job.ProgressSummary);
             job.WaitForNews(timeout * 1000);
         }
 
@@ -580,6 +585,7 @@ public static class ArtifactTools
 
         if (timeout > 0)
         {
+            McpProgress.Current.SetStatusProvider(job.ProgressSummary);
             job.WaitForNews(timeout * 1000);
         }
 
