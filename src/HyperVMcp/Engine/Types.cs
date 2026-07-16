@@ -157,6 +157,69 @@ public sealed class CommandJob : IDisposable
         return _newsEvent.Wait(timeoutMs);
     }
 
+    /// <summary>
+    /// Drain-style wait for polling: blocks until the command completes or the
+    /// timeout elapses, ignoring intermediate output lines (which only update the
+    /// progress provider). Unlike <see cref="WaitForNews"/> — which returns on the
+    /// first new output line for initial-output latency — this gives a poll a full
+    /// window so progress can stream. Mirrors BuildJob's poll semantics.
+    /// Future: accept early-return triggers (output filter/regex or parsed error)
+    /// analogous to BuildJob's return-on-new-error.
+    /// </summary>
+    public void WaitForCompletion(int timeoutMs)
+    {
+        if (timeoutMs <= 0) return;
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            // Reset BEFORE re-checking the terminal condition. Because
+            // Complete/Fail/TimedOut/Cancel all Set() the event AFTER updating
+            // Status under _lock, any completion landing after this Reset() leaves
+            // the event signaled, so the Wait() below returns immediately — no
+            // lost wakeup. (Do not delegate to WaitForNews here: its version
+            // capture + Reset would consume a completion that raced the check.)
+            lock (_lock)
+            {
+                if (Status != CommandStatus.Running) return;
+                _newsEvent.Reset();
+            }
+            var remaining = (int)(deadline - Environment.TickCount64);
+            if (remaining <= 0) return;
+            _newsEvent.Wait(remaining);
+        }
+    }
+
+    /// <summary>
+    /// Short, thread-safe progress summary for progress notifications: stdout line
+    /// count, stderr line count (when any), and a truncated last-line preview.
+    /// Returns null until any output arrives so the caller can fall back to the
+    /// generic keepalive text.
+    /// </summary>
+    public string? ProgressSummary()
+    {
+        var outLines = Output.TotalLinesReceived;
+        var errLines = Errors.TotalLinesReceived;
+        if (outLines == 0 && errLines == 0) return null;
+        var tail = Output.GetTail(1);
+        var lastLine = tail.Lines.Count > 0 ? tail.Lines[0] : null;
+        return FormatProgress(outLines, errLines, lastLine);
+    }
+
+    /// <summary>Pure formatter for the progress summary message (testable).</summary>
+    internal static string? FormatProgress(int totalLines, int stderrLines, string? lastLine)
+    {
+        if (totalLines == 0 && stderrLines == 0) return null;
+        var msg = $"{totalLines} {(totalLines == 1 ? "line" : "lines")} output";
+        if (stderrLines > 0)
+            msg += $", {stderrLines} stderr";
+        if (!string.IsNullOrEmpty(lastLine))
+        {
+            var preview = lastLine.Length > 100 ? lastLine[..100] + "…" : lastLine;
+            msg += $". Last: '{preview}'";
+        }
+        return msg;
+    }
+
     public CommandSnapshot GetSnapshot(int tailLines = 100, bool includeOutput = true, int? sinceLine = null)
     {
         lock (_lock)

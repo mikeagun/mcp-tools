@@ -104,6 +104,105 @@ public class TypesTests
     }
 
     [Fact]
+    public void CommandJob_WaitForCompletion_ReturnsOnComplete()
+    {
+        var job = new CommandJob("cmd-1", "s-1", "test");
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(50);
+            job.Complete(0);
+        });
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        job.WaitForCompletion(5000);
+        sw.Stop();
+
+        Assert.Equal(CommandStatus.Completed, job.Status);
+        Assert.True(sw.ElapsedMilliseconds < 4000, "should return promptly on completion, not wait the full timeout");
+    }
+
+    [Fact]
+    public void CommandJob_WaitForCompletion_DoesNotReturnOnOutput()
+    {
+        // Unlike WaitForNews, WaitForCompletion must keep waiting through output
+        // lines and only return when the command completes (or times out).
+        var job = new CommandJob("cmd-1", "s-1", "test");
+
+        _ = Task.Run(async () =>
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                await Task.Delay(40);
+                job.AddOutput($"line {i}");
+            }
+            await Task.Delay(40);
+            job.Complete(0);
+        });
+
+        job.WaitForCompletion(5000);
+        Assert.Equal(CommandStatus.Completed, job.Status);
+        Assert.Equal(3, job.GetSnapshot().TotalOutputLines);
+    }
+
+    [Fact]
+    public void CommandJob_WaitForCompletion_TimesOutWhileRunning()
+    {
+        var job = new CommandJob("cmd-1", "s-1", "test");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        job.WaitForCompletion(150);
+        sw.Stop();
+
+        Assert.Equal(CommandStatus.Running, job.Status);
+        Assert.True(sw.ElapsedMilliseconds >= 100, "should wait roughly the full timeout while running");
+    }
+
+    [Fact]
+    public void CommandJob_WaitForCompletion_AlreadyCompleted_ReturnsImmediately()
+    {
+        var job = new CommandJob("cmd-1", "s-1", "test");
+        job.Complete(0);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        job.WaitForCompletion(30_000);
+        sw.Stop();
+
+        Assert.True(sw.ElapsedMilliseconds < 500,
+            $"already-completed job must return immediately, waited {sw.ElapsedMilliseconds}ms");
+    }
+
+    [Fact]
+    public void CommandJob_WaitForCompletion_CompletesRightAtWaitStart_NoLostWakeup()
+    {
+        // Regression for the lost-wakeup window: completion that lands just as the
+        // drain begins must return promptly, not block the full timeout. Run many
+        // trials with completion fired from another thread with near-zero delay to
+        // exercise the check/Reset/Wait race.
+        for (var i = 0; i < 25; i++)
+        {
+            var job = new CommandJob($"cmd-{i}", "s-1", "test");
+            var start = new ManualResetEventSlim(false);
+            var completer = new Thread(() =>
+            {
+                start.Wait();
+                job.Complete(0);
+            }) { IsBackground = true };
+            completer.Start();
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            start.Set();
+            job.WaitForCompletion(30_000);
+            sw.Stop();
+            completer.Join(1000);
+
+            Assert.Equal(CommandStatus.Completed, job.Status);
+            Assert.True(sw.ElapsedMilliseconds < 2_000,
+                $"trial {i}: WaitForCompletion blocked {sw.ElapsedMilliseconds}ms after completion (lost wakeup)");
+            start.Dispose();
+        }
+    }
+
+    [Fact]
     public void CommandJob_GetSnapshot_TailLines()
     {
         var job = new CommandJob("cmd-1", "s-1", "test");
@@ -163,6 +262,64 @@ public class TypesTests
 
         var snapshot = job.GetSnapshot(includeOutput: false);
         Assert.Null(snapshot.Output);
+    }
+
+    [Fact]
+    public void CommandJob_ProgressSummary_NullBeforeAnyOutput()
+    {
+        var job = new CommandJob("cmd-1", "s-1", "test");
+        Assert.Null(job.ProgressSummary());
+    }
+
+    [Fact]
+    public void CommandJob_ProgressSummary_ReportsCountAndLastLine()
+    {
+        var job = new CommandJob("cmd-1", "s-1", "test");
+        job.AddOutput("Building core_lib...");
+        job.AddOutput("Linking...");
+
+        Assert.Equal("2 lines output. Last: 'Linking...'", job.ProgressSummary());
+    }
+
+    [Fact]
+    public void CommandJob_ProgressSummary_IncludesStderrCount()
+    {
+        var job = new CommandJob("cmd-1", "s-1", "test");
+        job.AddOutput("compiling...");
+        job.AddError("warning: deprecated");
+        job.AddError("warning: unused");
+
+        Assert.Equal("1 line output, 2 stderr. Last: 'compiling...'", job.ProgressSummary());
+    }
+
+    [Fact]
+    public void CommandJob_FormatProgress_ZeroLinesReturnsNull()
+    {
+        Assert.Null(CommandJob.FormatProgress(0, 0, "ignored"));
+    }
+
+    [Fact]
+    public void CommandJob_FormatProgress_StderrOnly_NoStdout()
+    {
+        Assert.Equal("0 lines output, 3 stderr", CommandJob.FormatProgress(0, 3, null));
+    }
+
+    [Fact]
+    public void CommandJob_FormatProgress_EmptyLastLineOmitsPreview()
+    {
+        Assert.Equal("5 lines output", CommandJob.FormatProgress(5, 0, null));
+        Assert.Equal("5 lines output", CommandJob.FormatProgress(5, 0, ""));
+    }
+
+    [Fact]
+    public void CommandJob_FormatProgress_TruncatesLongLastLine()
+    {
+        var longLine = new string('x', 250);
+        var msg = CommandJob.FormatProgress(3, 0, longLine);
+        Assert.StartsWith("3 lines output. Last: '", msg);
+        // 100 chars of preview + ellipsis, not the full 250.
+        Assert.Contains(new string('x', 100) + "…", msg);
+        Assert.DoesNotContain(new string('x', 101), msg);
     }
 }
 

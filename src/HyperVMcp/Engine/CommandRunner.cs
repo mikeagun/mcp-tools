@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Management.Automation;
+using McpSharp;
 
 namespace HyperVMcp.Engine;
 
@@ -69,6 +70,7 @@ public sealed class CommandRunner : IDisposable
         var job = StartCommand(sessionId, command, workingDirectory, outputFormat, hardTimeoutSecs, outputMode, saveTo);
 
         // Wait for completion or timeout.
+        McpProgress.Current.SetStatusProvider(job.ProgressSummary);
         var completed = job.WaitForNews(timeoutSeconds * 1000);
 
         // If still running after initial wait, keep waiting briefly for any final output.
