@@ -3,7 +3,9 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using System.Text.RegularExpressions;
+using McpSharp;
 
 namespace MsBuildMcp.Engine;
 
@@ -13,10 +15,16 @@ namespace MsBuildMcp.Engine;
 /// </summary>
 public sealed class BuildJob : IDisposable
 {
-    private static readonly Regex ProjectDoneRegex = new(
-        @"^\s*\d+>Done Building Project ""([^""]+)""",
+    // Emitted once per project as it finishes producing output ("Name -> path").
+    // Present at minimal verbosity and above (unlike "Done Building Project",
+    // which only appears at normal+), so this is the reliable cross-verbosity
+    // project-completion signal.
+    private static readonly Regex ProjectOutputRegex = new(
+        @"^\s+(.+?) -> .+",
         RegexOptions.Compiled);
 
+    // "Project X on node N" only appears at normal+ verbosity; used to surface
+    // the currently-building project name when available.
     private static readonly Regex ProjectStartRegex = new(
         @"^\s*\d+>Project ""([^""]+)"" on node \d+",
         RegexOptions.Compiled);
@@ -42,6 +50,7 @@ public sealed class BuildJob : IDisposable
     private int _projectsStarted;
     private int _projectsCompleted;
     private string? _currentProject;
+    private string? _lastCompletedProject;
     private int _lastReportedErrorCount;
     private bool _completed;
     private int? _exitCode;
@@ -151,9 +160,12 @@ public sealed class BuildJob : IDisposable
                 _currentProject = Path.GetFileNameWithoutExtension(startMatch.Groups[1].Value);
             }
 
-            var doneMatch = ProjectDoneRegex.Match(line);
+            var doneMatch = ProjectOutputRegex.Match(line);
             if (doneMatch.Success)
+            {
                 _projectsCompleted++;
+                _lastCompletedProject = doneMatch.Groups[1].Value.Trim();
+            }
 
             // Signal news only on new ERRORS (not warnings — warnings rarely change the agent's next action)
             if (diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error))
@@ -248,6 +260,53 @@ public sealed class BuildJob : IDisposable
         catch { /* process may have already exited */ }
     }
 
+    /// <summary>
+    /// Short, thread-safe progress summary for progress notifications: output
+    /// line count plus, where available, projects completed, the current or last
+    /// project, and error/warning counts. Returns null before any output arrives
+    /// so the caller can fall back to the generic keepalive text.
+    /// </summary>
+    public string? ProgressSummary()
+    {
+        lock (_lock)
+            return FormatProgress(_lineCounter, _projectsCompleted, _currentProject,
+                _lastCompletedProject, _errors.Count, _warnings.Count);
+    }
+
+    /// <summary>Pure formatter for the progress summary message (testable).</summary>
+    internal static string? FormatProgress(int totalLines, int projectsCompleted,
+        string? currentProject, string? lastCompletedProject, int errorCount, int warningCount)
+    {
+        if (totalLines == 0) return null;
+
+        var sb = new StringBuilder();
+        sb.Append(totalLines).Append(totalLines == 1 ? " line" : " lines");
+
+        if (projectsCompleted > 0)
+            sb.Append(", ").Append(projectsCompleted)
+              .Append(projectsCompleted == 1 ? " project done" : " projects done");
+
+        if (currentProject != null)
+            sb.Append(". Building: ").Append(currentProject);
+        else if (lastCompletedProject != null)
+            sb.Append(". Last: ").Append(lastCompletedProject);
+
+        if (errorCount > 0 || warningCount > 0)
+        {
+            sb.Append(" (");
+            if (errorCount > 0)
+                sb.Append(errorCount).Append(errorCount == 1 ? " error" : " errors");
+            if (warningCount > 0)
+            {
+                if (errorCount > 0) sb.Append(", ");
+                sb.Append(warningCount).Append(warningCount == 1 ? " warning" : " warnings");
+            }
+            sb.Append(')');
+        }
+
+        return sb.ToString();
+    }
+
     public bool IsCompleted
     {
         get { lock (_lock) { return _completed; } }
@@ -317,6 +376,7 @@ public sealed class BuildManager : IDisposable
                 Monitor.Exit(_lock);
                 try
                 {
+                    McpProgress.Current.SetStatusProvider(job.ProgressSummary);
                     job.WaitForNews(timeoutSeconds * 1000);
                 }
                 finally
@@ -365,6 +425,7 @@ public sealed class BuildManager : IDisposable
         }
 
         // Wait for initial results
+        McpProgress.Current.SetStatusProvider(newJob.ProgressSummary);
         newJob.WaitForNews(timeoutSeconds * 1000);
         var result = newJob.GetStatus();
         result.ProjectsTotal = projectsTotal;
@@ -390,6 +451,7 @@ public sealed class BuildManager : IDisposable
                         Monitor.Exit(_lock);
                         try
                         {
+                            McpProgress.Current.SetStatusProvider(job.ProgressSummary);
                             job.WaitForNews(timeoutSeconds * 1000);
                         }
                         finally
@@ -529,6 +591,7 @@ public sealed class BuildManager : IDisposable
                 Monitor.Exit(_lock);
                 try
                 {
+                    McpProgress.Current.SetStatusProvider(job.ProgressSummary);
                     job.WaitForNews(timeoutSeconds * 1000);
                 }
                 finally
@@ -568,6 +631,7 @@ public sealed class BuildManager : IDisposable
             _currentBuild = newJob;
         }
 
+        McpProgress.Current.SetStatusProvider(newJob.ProgressSummary);
         newJob.WaitForNews(timeoutSeconds * 1000);
         var result = newJob.GetStatus();
         ArchiveIfCompleted();
