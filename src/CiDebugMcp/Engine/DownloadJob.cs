@@ -186,6 +186,55 @@ public sealed class DownloadJob : IDisposable
     }
 
     /// <summary>
+    /// Drain-style wait for polling: blocks until the download completes or the
+    /// timeout elapses, ignoring intermediate progress pulses (byte counters keep
+    /// updating live for the progress provider). Unlike <see cref="WaitForNews"/>
+    /// — which returns on the first 5MB pulse for latency — this gives a poll a
+    /// full window so byte progress streams. Mirrors the command/build poll model.
+    /// </summary>
+    public void WaitForCompletion(int timeoutMs)
+    {
+        if (timeoutMs <= 0) return;
+
+        var deadline = Environment.TickCount64 + timeoutMs;
+        lock (_lock)
+        {
+            while (!_completed)
+            {
+                var remaining = (int)(deadline - Environment.TickCount64);
+                if (remaining <= 0) return;
+                Monitor.Wait(_lock, remaining);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Short, thread-safe progress summary for progress notifications: MB
+    /// downloaded, total, and percent (percent/total omitted when the server sent
+    /// no Content-Length). Returns null before the first bytes arrive so the
+    /// caller can fall back to the generic keepalive text.
+    /// </summary>
+    public string? ProgressSummary()
+    {
+        lock (_lock)
+            return FormatProgress(_bytesDownloaded, _totalBytes);
+    }
+
+    /// <summary>Pure formatter for the progress summary message (testable).</summary>
+    internal static string? FormatProgress(long bytesDownloaded, long totalBytes)
+    {
+        if (bytesDownloaded <= 0) return null;
+        var mb = bytesDownloaded / (1024.0 * 1024.0);
+        if (totalBytes > 0)
+        {
+            var totalMb = totalBytes / (1024.0 * 1024.0);
+            var pct = (int)(bytesDownloaded * 100 / totalBytes);
+            return $"Downloading: {mb:0}MB/{totalMb:0}MB ({pct}%)";
+        }
+        return $"Downloading: {mb:0}MB";
+    }
+
+    /// <summary>
     /// Snapshot of current download state.
     /// </summary>
     public DownloadStatus GetStatus(bool includeContents = false, int maxContents = 20)
