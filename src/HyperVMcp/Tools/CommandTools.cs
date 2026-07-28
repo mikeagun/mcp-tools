@@ -88,7 +88,9 @@ public static class CommandTools
         {
             Name = "get_command_status",
             Description = "Poll a running or recently completed command. " +
-                "Set timeout > 0 to wait for new output or completion. " +
+                "Set timeout > 0 to wait until the command completes or the timeout elapses " +
+                "(output keeps accumulating during the wait; progress is reported as it streams). " +
+                "Choose a smaller timeout for finer polling, a larger one to block longer. " +
                 "Use since_line to get only new output since last poll (returns last tail_lines of new output). " +
                 "Set include_output=false for cheap status-only polls.",
             InputSchema = new JsonObject
@@ -104,7 +106,7 @@ public static class CommandTools
                     ["timeout"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = "Seconds to wait for new output or completion (default: 0 = instant). Returns early if command completes or new output arrives.",
+                        ["description"] = "Seconds to wait until the command completes or the timeout elapses (default: 0 = instant snapshot). Returns early on completion. The agent controls polling frequency via this value.",
                     },
                     ["tail_lines"] = new JsonObject
                     {
@@ -136,7 +138,10 @@ public static class CommandTools
                     ?? throw new InvalidOperationException($"Command '{commandId}' not found. It may have expired — use invoke_command to start a new one.");
 
                 if (timeout > 0 && job.Status == CommandStatus.Running)
-                    job.WaitForNews(timeout * 1000);
+                {
+                    McpProgress.Current.SetStatusProvider(job.ProgressSummary);
+                    job.WaitForCompletion(timeout * 1000);
+                }
 
                 return SnapshotToJson(job.GetSnapshot(tailLines, includeOutput, sinceLine));
             },
