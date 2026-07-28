@@ -14,4 +14,8 @@
     <PackageTags>mcp json-rpc dotnet llm ai tools</PackageTags>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="McpSharp.Tests" />
+  </ItemGroup>
+
 </Project>

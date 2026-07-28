@@ -205,36 +205,26 @@ public sealed class McpTransport
     private void DispatchAndRespond(Func<string, JsonNode?, JsonNode?> handler,
         string method, JsonNode? parameters, bool isNotification, string? idJson)
     {
-        // Progress keepalive: if this is a tools/call with a progressToken,
-        // emit periodic notifications/progress to reset the client's timeout clock.
+        // Progress: if this is a tools/call with a progressToken, create a session
+        // that (a) emits a periodic keepalive to reset the client's timeout clock
+        // and (b) lets the handler emit meaningful status via McpProgress.Current.
         // The MCP spec defines progressToken as string | integer.
         JsonNode? progressTokenNode = null;
         if (method == "tools/call")
             progressTokenNode = parameters?["_meta"]?["progressToken"];
 
-        long progressCounter = 0;
-        int keepaliveStopped = 0;
-        Timer? keepaliveTimer = null;
-
-        if (progressTokenNode != null)
-        {
-            keepaliveTimer = new Timer(_ =>
-            {
-                if (Volatile.Read(ref keepaliveStopped) != 0) return;
-                var count = Interlocked.Increment(ref progressCounter);
-                try { SendProgress(progressTokenNode, count, message: "Still working…"); }
-                catch { /* transport may be closed */ }
-            }, null, 10_000, 15_000);
-        }
+        var progressSession = progressTokenNode != null
+            ? new ProgressSession(this, progressTokenNode)
+            : null;
+        McpProgress.SetCurrent(progressSession);
 
         try
         {
             var result = handler(method, parameters);
 
-            // Stop keepalive and drain any in-flight callback before sending
-            // the response — ensures no progress arrives after the result.
-            Interlocked.Exchange(ref keepaliveStopped, 1);
-            DrainTimer(ref keepaliveTimer);
+            // Stop progress and drain any in-flight callback before sending the
+            // response — ensures no progress arrives after the result.
+            progressSession?.Stop();
 
             if (!isNotification)
             {
@@ -251,8 +241,7 @@ public sealed class McpTransport
         }
         catch (Exception ex)
         {
-            Interlocked.Exchange(ref keepaliveStopped, 1);
-            DrainTimer(ref keepaliveTimer);
+            progressSession?.Stop();
 
             if (!isNotification)
             {
@@ -275,22 +264,10 @@ public sealed class McpTransport
         }
         finally
         {
-            if (progressTokenNode != null && progressCounter > 0)
-                Console.Error.WriteLine($"{_logPrefix}: progress keepalive sent {progressCounter} notifications");
+            McpProgress.SetCurrent(null);
+            if (progressSession != null && progressSession.NotificationsSent > 0)
+                Console.Error.WriteLine($"{_logPrefix}: progress sent {progressSession.NotificationsSent} notifications");
         }
-    }
-
-    /// <summary>
-    /// Dispose a timer and wait for any in-flight callback to complete.
-    /// Sets the reference to null to prevent double-dispose.
-    /// </summary>
-    private static void DrainTimer(ref Timer? timer)
-    {
-        if (timer == null) return;
-        using var drained = new ManualResetEvent(false);
-        timer.Dispose(drained);
-        drained.WaitOne();
-        timer = null;
     }
 
     // ── Progress notifications ──────────────────────────────────

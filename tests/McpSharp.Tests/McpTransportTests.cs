@@ -660,7 +660,7 @@ public class McpTransportTests
             InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
             Handler = _ =>
             {
-                Thread.Sleep(12_000); // >10s triggers keepalive
+                Thread.Sleep(3_000); // >1s initial delay triggers a keepalive tick
                 return new JsonObject { ["done"] = true };
             },
         });
@@ -750,7 +750,7 @@ public class McpTransportTests
 
         transport.Run((method, parameters) =>
         {
-            Thread.Sleep(11_000); // triggers one keepalive tick
+            Thread.Sleep(3_000); // triggers a keepalive tick (1s initial delay)
             throw new Exception("handler failed");
         });
 
@@ -762,5 +762,292 @@ public class McpTransportTests
 
         // Timer should have been disposed — no further messages after error
         // (can't easily test absence of future messages, but at least verify it didn't crash)
+    }
+
+    // ── Rich progress: push (Report) + pull (status provider) ───────
+
+    [Fact]
+    public void Progress_Current_DefaultsToNoOp()
+    {
+        // Outside any tools/call, the ambient reporter is a non-null no-op.
+        Assert.NotNull(McpProgress.Current);
+        McpProgress.Current.Report("ignored");
+        McpProgress.Current.SetStatusProvider(() => "ignored");
+    }
+
+    [Fact]
+    public void Progress_Push_EmitsImmediatelyWithMonotonicCounter()
+    {
+        // Handler pushes two explicit reports and returns fast (no 10s timer wait).
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["_meta"] = new JsonObject { ["progressToken"] = "push-1" },
+                ["name"] = "pushy_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var server = new McpServer("test");
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "pushy_tool",
+            Description = "Pushes explicit progress",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ =>
+            {
+                McpProgress.Current.Report("step one");
+                McpProgress.Current.Report("step two");
+                return new JsonObject { ["done"] = true };
+            },
+        });
+        server.Transport = transport;
+
+        transport.Run((method, parameters) => server.Dispatch(method, parameters));
+
+        var messages = ParseNdjsonOutput(output);
+        var progressMsgs = messages.Where(m =>
+            m["method"]?.GetValue<string>() == "notifications/progress").ToList();
+
+        Assert.Equal(2, progressMsgs.Count);
+        Assert.Equal("push-1", progressMsgs[0]["params"]!["progressToken"]!.GetValue<string>());
+        Assert.Equal(1, progressMsgs[0]["params"]!["progress"]!.GetValue<long>());
+        Assert.Equal("step one", progressMsgs[0]["params"]!["message"]!.GetValue<string>());
+        Assert.Equal(2, progressMsgs[1]["params"]!["progress"]!.GetValue<long>());
+        Assert.Equal("step two", progressMsgs[1]["params"]!["message"]!.GetValue<string>());
+
+        // Response follows the progress notifications.
+        var response = messages.Last(m => m.AsObject().ContainsKey("id"));
+        Assert.NotNull(response["result"]);
+    }
+
+    [Fact]
+    public void Progress_Push_WithoutProgressTokenIsNoOp()
+    {
+        // No _meta.progressToken → the ambient reporter is a no-op; Report emits nothing.
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["name"] = "pushy_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var server = new McpServer("test");
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "pushy_tool",
+            Description = "Pushes explicit progress",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ =>
+            {
+                McpProgress.Current.Report("should be dropped");
+                return new JsonObject { ["done"] = true };
+            },
+        });
+        server.Transport = transport;
+
+        transport.Run((method, parameters) => server.Dispatch(method, parameters));
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.DoesNotContain(messages, m => m["method"]?.GetValue<string>() == "notifications/progress");
+        Assert.Single(messages); // just the response
+    }
+
+    [Fact]
+    public void Progress_Pull_TimerEmitsProviderMessageInsteadOfHeartbeat()
+    {
+        // Slow handler registers a status provider; the keepalive tick should emit
+        // the provider's message instead of the static heartbeat text.
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["_meta"] = new JsonObject { ["progressToken"] = "pull-1" },
+                ["name"] = "slow_pull_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var server = new McpServer("test");
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "slow_pull_tool",
+            Description = "Registers a status provider then waits",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ =>
+            {
+                McpProgress.Current.SetStatusProvider(() => "42 lines output. Last: 'compiling'");
+                Thread.Sleep(3_000); // >1s initial delay → a timer tick fires
+                return new JsonObject { ["done"] = true };
+            },
+        });
+        server.Transport = transport;
+
+        transport.Run((method, parameters) => server.Dispatch(method, parameters));
+
+        var messages = ParseNdjsonOutput(output);
+        var progressMsgs = messages.Where(m =>
+            m["method"]?.GetValue<string>() == "notifications/progress").ToList();
+
+        Assert.True(progressMsgs.Count >= 1, "Expected at least one progress notification");
+        Assert.Equal("42 lines output. Last: 'compiling'",
+            progressMsgs[0]["params"]!["message"]!.GetValue<string>());
+        Assert.Equal(1, progressMsgs[0]["params"]!["progress"]!.GetValue<long>());
+    }
+
+    [Fact]
+    public void Progress_Push_AfterHandlerReturns_IsDropped()
+    {
+        // Capture the live reporter during the call, then push after it returns.
+        // The session is stopped by then, so the late push must not be emitted
+        // (and must never land after the response).
+        IProgressReporter? captured = null;
+
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["_meta"] = new JsonObject { ["progressToken"] = "late-1" },
+                ["name"] = "capturing_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var server = new McpServer("test");
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "capturing_tool",
+            Description = "Captures the reporter",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ =>
+            {
+                captured = McpProgress.Current;
+                return new JsonObject { ["done"] = true };
+            },
+        });
+        server.Transport = transport;
+
+        transport.Run((method, parameters) => server.Dispatch(method, parameters));
+
+        // The call has completed and the session is stopped — this push is dropped.
+        captured!.Report("late push");
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.DoesNotContain(messages, m =>
+            m["method"]?.GetValue<string>() == "notifications/progress" &&
+            m["params"]?["message"]?.GetValue<string>() == "late push");
+    }
+
+    // ── Adaptive dedupe-pull ────────────────────────────────────────
+
+    [Theory]
+    // force always emits, even when unchanged and within backstop.
+    [InlineData("x", "x", 0L, 15000L, true, true)]
+    // first emission (nothing emitted yet).
+    [InlineData("x", null, 0L, 15000L, false, true)]
+    // content changed → emit.
+    [InlineData("y", "x", 0L, 15000L, false, true)]
+    // unchanged within the backstop window → skip.
+    [InlineData("x", "x", 5000L, 15000L, false, false)]
+    // unchanged but backstop elapsed → emit to refresh the client timeout.
+    [InlineData("x", "x", 15000L, 15000L, false, true)]
+    [InlineData("x", "x", 20000L, 15000L, false, true)]
+    public void ShouldEmit_DedupeAndBackstop(string message, string? lastEmitted,
+        long msSinceLastEmit, long backstopMs, bool force, bool expected)
+    {
+        Assert.Equal(expected,
+            ProgressSession.ShouldEmit(message, lastEmitted, msSinceLastEmit, backstopMs, force));
+    }
+
+    [Fact]
+    public void Progress_Pull_ChangingProvider_EmitsMultipleDistinctUpdates()
+    {
+        // A provider whose text changes each tick should produce several distinct,
+        // monotonically-counted progress updates on the fast cadence — not a single
+        // sample. Exercises the adaptive dedupe-pull path end to end.
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["_meta"] = new JsonObject { ["progressToken"] = "adapt-1" },
+                ["name"] = "changing_tool",
+                ["arguments"] = new JsonObject(),
+            },
+        };
+        var input = MakeNdjsonInput(request.ToJsonString());
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var server = new McpServer("test");
+        var lines = 0;
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "changing_tool",
+            Description = "Provider text changes over time",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ =>
+            {
+                McpProgress.Current.SetStatusProvider(() => $"{Volatile.Read(ref lines)} lines");
+                // Advance the reported line count while the timer ticks (~1s, 3s, 5s)
+                // so at least two ticks observe distinct values.
+                for (var i = 0; i < 5; i++)
+                {
+                    Thread.Sleep(1_000);
+                    Interlocked.Increment(ref lines);
+                }
+                return new JsonObject { ["done"] = true };
+            },
+        });
+        server.Transport = transport;
+
+        transport.Run((method, parameters) => server.Dispatch(method, parameters));
+
+        var messages = ParseNdjsonOutput(output);
+        var progressMsgs = messages.Where(m =>
+            m["method"]?.GetValue<string>() == "notifications/progress").ToList();
+
+        // At least two distinct updates over ~5s (vs. exactly one under the old
+        // fixed 15s cadence).
+        var distinct = progressMsgs
+            .Select(m => m["params"]!["message"]!.GetValue<string>())
+            .Distinct()
+            .ToList();
+        Assert.True(distinct.Count >= 2,
+            $"Expected >=2 distinct progress messages, got {distinct.Count}: [{string.Join(", ", distinct)}]");
+
+        // Counter is monotonically increasing across emissions.
+        var counts = progressMsgs.Select(m => m["params"]!["progress"]!.GetValue<long>()).ToList();
+        for (var i = 1; i < counts.Count; i++)
+            Assert.True(counts[i] > counts[i - 1], "progress counter must be monotonic");
     }
 }
