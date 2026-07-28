@@ -137,6 +137,58 @@ public class BuildRunnerTests
         Assert.DoesNotContain("", args);
     }
 
+    // --- Progress summary ---
+
+    [Fact]
+    public void FormatProgress_NoOutput_ReturnsNull()
+    {
+        // Falls back to the generic keepalive text before any output arrives.
+        Assert.Null(BuildJob.FormatProgress(totalLines: 0, projectsCompleted: 0,
+            currentProject: null, lastCompletedProject: null, errorCount: 0, warningCount: 0));
+    }
+
+    [Fact]
+    public void FormatProgress_LinesOnly_BeforeAnyProject()
+    {
+        Assert.Equal("37 lines",
+            BuildJob.FormatProgress(37, 0, null, null, 0, 0));
+    }
+
+    [Fact]
+    public void FormatProgress_CurrentProject_UsesBuildingClause()
+    {
+        Assert.Equal("512 lines, 8 projects done. Building: DataLib",
+            BuildJob.FormatProgress(512, 8, "DataLib", "McpSharp", 0, 0));
+    }
+
+    [Fact]
+    public void FormatProgress_NoCurrentProject_UsesLastClause()
+    {
+        Assert.Equal("142 lines, 3 projects done. Last: McpSharp",
+            BuildJob.FormatProgress(142, 3, null, "McpSharp", 0, 0));
+    }
+
+    [Fact]
+    public void FormatProgress_IncludesErrorsAndWarnings()
+    {
+        Assert.Equal("512 lines, 8 projects done. Last: CiDebugMcp (2 errors, 1 warning)",
+            BuildJob.FormatProgress(512, 8, null, "CiDebugMcp", 2, 1));
+    }
+
+    [Fact]
+    public void FormatProgress_SingularForms()
+    {
+        Assert.Equal("1 line, 1 project done. Last: X (1 error)",
+            BuildJob.FormatProgress(1, 1, null, "X", 1, 0));
+    }
+
+    [Fact]
+    public void FormatProgress_WarningsOnly_NoProjects()
+    {
+        Assert.Equal("89 lines (1 warning)",
+            BuildJob.FormatProgress(89, 0, null, null, 0, 1));
+    }
+
     // --- Concurrency invariant ---
 
     /// <summary>
