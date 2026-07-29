@@ -27,16 +27,9 @@ dotnet build
 ## Testing
 
 ```bash
-dotnet test    # 732 tests across all projects
+dotnet test                        # all projects
+dotnet test tests/McpSharp.Tests   # a single project
 ```
-
-| Project | Tests |
-|---------|-------|
-| McpSharp | 151 |
-| HyperVMcp | 191 |
-| CiDebugMcp | 183 |
-| MsBuildMcp | 185 |
-| ElicitMcp | 22 |
 
 ## Publishing
 
