@@ -117,6 +117,24 @@ covering every primitive, constraint, format, default, and both enum variants.
   the logical field model, client feature-support flags (used to exercise each
   fallback rung deterministically), and supporting value types.
 
+## Progress Reporting (`McpProgress`)
+
+Long-running `tools/call` handlers can emit operation-specific progress that keeps the
+client's timeout alive. The transport opens a per-call progress session whenever the
+client supplies a `progressToken`; handlers reach the ambient reporter via
+`McpProgress.Current` (a no-op when no token was sent, so handlers can report
+unconditionally):
+
+- **Push** — `McpProgress.Current.Report("compiled 12/40 projects")` emits a status
+  message immediately.
+- **Pull** — `McpProgress.Current.SetStatusProvider(() => job.StatusLine)` registers a
+  callback the keepalive timer polls each tick. It emits the message (or a
+  `Still working…` heartbeat) only when the text changes, with an idle backstop that
+  still refreshes the client timeout during genuinely idle waits.
+
+All emissions share one monotonic counter and are serialized against session shutdown,
+so no progress notification is sent after the tool response.
+
 ## Policy Framework
 
 McpSharp includes a shared policy framework (`McpSharp.Policy` namespace) for guardrail enforcement across MCP servers. It provides:
@@ -141,7 +159,7 @@ McpSharp includes a shared policy framework (`McpSharp.Policy` namespace) for gu
 - **`PolicyDecision`** — enum: Allow, Deny, Confirm
 - **`ApprovalPolarity`** — enum: Allow, Deny
 - **`ApprovalPersistence`** — enum: Session, Permanent
-- **`PolicyConfig`** — Base config with Mode, Rules, DenyRules, UserRules
+- **`PolicyConfig`** — Base config with `UserRules` and `DenyRules` (persisted as `user_rules`/`deny_rules`); servers extend it for custom settings
 
 ### Interfaces (servers implement)
 

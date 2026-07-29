@@ -68,7 +68,7 @@ storms:
 | Tool | Purpose | Returns |
 |------|---------|---------|
 | `request_decision` | Ask the user to choose among options (single or multi-select, with/without titles) | `{ status, decision_made, decision\|selections, fallback_used }` |
-| `request_input` | Collect typed structured input (string/number/integer/boolean/enum, constraints, formats, defaults). For free-text feedback, pass a single optional string field | `{ status, values, fallback_used }` |
+| `request_input` | Collect typed structured input (string/number/integer/boolean/enum/multi_enum, constraints, formats, defaults). For free-text feedback, pass a single optional string field | `{ status, values, fallback_used }` |
 | `report_capabilities` | Report the client's advertised form/url support and whether demo mode is active. Sends no prompt | `{ advertised: { supported, form, url }, empty_object_is_form_only, demo_mode_active }` |
 
 They are **safe**: sensitive field names (`password`/`token`/`api_key`/…) are refused

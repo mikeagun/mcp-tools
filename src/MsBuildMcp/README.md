@@ -121,7 +121,7 @@ Options adapt to context:
 - **Non-default configurations** add config-qualified options ("Allow Release builds of bpf2c on X")
 - **Full solution builds** only show solution-level options
 
-All query/analysis tools (14 of 16) are read-only and require no approval.
+All query/analysis tools (14 of 17) are read-only and require no approval.
 
 ### Build Constraints
 
@@ -302,7 +302,7 @@ src/MsBuildMcp/
 └── Resources/              # MCP resource providers
 ```
 
-Tests are located at `tests/MsBuildMcp.Tests/` (144 unit, integration, and E2E tests).
+Tests are located at `tests/MsBuildMcp.Tests/`.
 
 ### Key Design Decisions
 
@@ -310,9 +310,9 @@ Tests are located at `tests/MsBuildMcp.Tests/` (144 unit, integration, and E2E t
 
 **Dual MSBuild strategy**: The in-process evaluation API uses the .NET SDK's MSBuild (with working SDK resolvers for .NET 9) plus Visual Studio's `VCTargetsPath` (for C++ project support). The build subprocess uses Visual Studio's `MSBuild.exe` directly via `vswhere` discovery.
 
-**Async build model**: Builds run in a background process with streaming output parsing. The `build` tool returns early on new errors (so agents can cancel and fix without waiting). A ring buffer retains the last 1000 output lines.
+**Async build model**: Builds run in a background process with streaming output parsing. The `build` tool returns early on new errors (so agents can cancel and fix without waiting), and streams live progress (lines parsed + projects completed) to clients that pass a `progressToken`. Output is retained in `full` mode by default (up to 50 MB in memory with lazy spill-to-disk); a lightweight `tail` mode keeps only the last 1000 lines.
 
-**Stateless tools, cached engine**: Each tool call is stateless, but the engine layer caches evaluated projects keyed by `(path, config, platform, mtime)`.
+**Stateless tools, cached engine**: Each tool call is stateless, but the engine layer caches evaluated projects keyed by `(path, config, platform, solutionDir, additionalProperties)` and invalidated when the project file's mtime changes.
 
 ## Copilot Skill & VS Code Prompt
 
