@@ -14,7 +14,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 ### Development Setup
 
 ```bash
-git clone https://github.com/microsoft/mcp-tools.git
+git clone https://github.com/mikeagun/mcp-tools.git
 cd mcp-tools
 dotnet build
 dotnet test
@@ -26,6 +26,7 @@ dotnet test
 dotnet run --project src/MsBuildMcp
 dotnet run --project src/CiDebugMcp
 dotnet run --project src/HyperVMcp
+dotnet run --project src/ElicitMcp
 ```
 
 Each server communicates via JSON-RPC 2.0 over stdio. Send an `initialize` request to start:
@@ -40,6 +41,7 @@ Each server communicates via JSON-RPC 2.0 over stdio. Send an `initialize` reque
 - `src/HyperVMcp/` — Hyper-V VM management MCP server
 - `src/CiDebugMcp/` — CI/CD failure investigation MCP server
 - `src/MsBuildMcp/` — MSBuild project exploration and build MCP server
+- `src/ElicitMcp/` — Agent-facing elicitation MCP server (decision/input + conformance harness)
 - `tests/` — Test projects (one per src project)
 
 ## Making Changes
@@ -54,7 +56,7 @@ Each server communicates via JSON-RPC 2.0 over stdio. Send an `initialize` reque
 
 ### Modifying McpSharp (Shared Library)
 
-Changes to `src/McpSharp/` affect all three servers. Ensure all test suites pass:
+Changes to `src/McpSharp/` affect all four servers. Ensure all test suites pass:
 
 ```bash
 dotnet test
@@ -79,6 +81,7 @@ dotnet test tests/MsBuildMcp.Tests
 dotnet test tests/CiDebugMcp.Tests
 dotnet test tests/HyperVMcp.Tests
 dotnet test tests/McpSharp.Tests
+dotnet test tests/ElicitMcp.Tests
 ```
 
 All tests must pass before submitting a PR. Tests should be self-contained — they create temporary solutions/projects in `%TEMP%` and clean up after themselves.
@@ -100,7 +103,7 @@ All tests must pass before submitting a PR. Tests should be self-contained — t
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/microsoft/mcp-tools/issues) to report bugs or request features. Include:
+Use [GitHub Issues](https://github.com/mikeagun/mcp-tools/issues) to report bugs or request features. Include:
 
 - MSBuild MCP Server version
 - .NET SDK version (`dotnet --version`)

@@ -4,15 +4,15 @@ This document provides guidance for AI agents working with this repository.
 
 ## Repository Overview
 
-This repository contains a shared **MCP (Model Context Protocol)** library and three MCP servers for AI-assisted development:
+This repository contains a shared **MCP (Model Context Protocol)** library and four MCP servers for AI-assisted development:
 
-| Project | Purpose | Tests |
-|---------|---------|-------|
-| **McpSharp** (`src/McpSharp/`) | Shared MCP protocol library — JSON-RPC 2.0, tool/resource/prompt registry, elicitation, policy framework | 151 |
-| **HyperVMcp** (`src/HyperVMcp/`) | Hyper-V VM management, remote execution, file transfers, guardrails | 191 |
-| **CiDebugMcp** (`src/CiDebugMcp/`) | CI/CD failure investigation, log analysis, artifact downloads | 183 |
-| **MsBuildMcp** (`src/MsBuildMcp/`) | MSBuild solution/project evaluation, dependency graphs, builds, guardrails | 185 |
-| **ElicitMcp** (`src/ElicitMcp/`) | Agent-facing elicitation (decision/input) + form-mode conformance/showcase harness | 22 |
+| Project | Purpose |
+|---------|---------|
+| **McpSharp** (`src/McpSharp/`) | Shared MCP protocol library — JSON-RPC 2.0, tool/resource/prompt registry, elicitation, policy framework |
+| **HyperVMcp** (`src/HyperVMcp/`) | Hyper-V VM management, remote execution, file transfers, guardrails |
+| **CiDebugMcp** (`src/CiDebugMcp/`) | CI/CD failure investigation, log analysis, artifact downloads |
+| **MsBuildMcp** (`src/MsBuildMcp/`) | MSBuild solution/project evaluation, dependency graphs, builds, guardrails |
+| **ElicitMcp** (`src/ElicitMcp/`) | Agent-facing elicitation (decision/input) + form-mode conformance/showcase harness |
 
 **Tech stack**: C# / .NET 9 / JSON-RPC 2.0 over stdio
 
@@ -42,7 +42,7 @@ dotnet run --project src/MsBuildMcp       # Run a specific server
 - Documentation updates
 
 ### ⚠️ Be Careful With
-- **McpSharp changes** affect all three servers — run the full test suite
+- **McpSharp changes** affect all four servers — run the full test suite
 - `ProjectEngine.EnsureMsBuildRegistered()` — MSBuild registration is sensitive
 - `BuildManager.DiscoverVsToolchain()` — VS discovery and vcvarsall environment capture
 - `ElevatedBackend.cs` — Frontend/backend protocol for Hyper-V privilege escalation

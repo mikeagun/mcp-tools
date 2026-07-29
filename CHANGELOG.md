@@ -19,9 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Early response buffering for sequential elicitation calls
   - Full form-mode elicitation engine (`McpSharp.Elicitation`, MCP `2025-11-25`): `FormSchemaBuilder` (typed primitive/enum/array construct emitters, flat-object guard, sensitive-field guard), pure single-shot `ElicitationPlanner` (F1/F4/F5/F6 rewrites), `ElicitationDriver` (F2/F3/F8 orchestration with decision-field deny-safety), `FormValidator` (server-side validation), and typed `ElicitationResult` accessors
   - `ElicitationCapabilities` parsed at `initialize` (form/url modes; empty object = form-only) with structural mode-guarding so the server never sends a mode the client did not advertise
-  - 158 tests
 
-- **HyperVMcp** — Hyper-V VM management server (25 tools):
+- **HyperVMcp** — Hyper-V VM management server (26 tools):
   - VM lifecycle: `list_vms`, `start_vm`, `stop_vm`, `restart_vm`, `checkpoint_vm`, `restore_vm`
   - Sessions: `connect_vm`, `disconnect_vm`, `reconnect_vm`, `list_sessions`
   - Commands: `invoke_command`, `get_command_status`, `cancel_command`, `run_script`
@@ -30,14 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Diagnostics: `get_vm_info`, `get_services`, `manage_service`, `kill_process`, `set_env`
   - Elevated backend pattern (lazy UAC via `sudo`)
   - Policy-based guardrails with MCP elicitation
-  - 188 tests
 
 - **CiDebugMcp** — CI/CD failure investigation server (6 tools):
   - `get_ci_failures`, `search_job_logs`, `get_step_logs`, `download_artifact`, `analyze_binary_deps`, `update_binary_baselines`
   - GitHub Actions and Azure DevOps support
   - Lazy multi-source authentication (env vars, GCM, CLI)
   - Agent-first API with progressive disclosure and failure classification
-  - 135 tests
 
 - **MsBuildMcp** — MSBuild project exploration server (17 tools, 5 prompts):
   - Project exploration: `list_projects`, `get_project_details`, `get_project_items`, `get_project_imports`, `find_project_for_file`
@@ -48,7 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Dual MSBuild strategy (dotnet SDK evaluation + VS MSBuild builds)
   - `publish` uses `dotnet` CLI directly (not VS MSBuild) for .NET SDK projects
   - Policy-based guardrails with MCP elicitation
-  - 167 tests
 
 - **ElicitMcp** — Dual-purpose elicitation server with a deliberately small surface:
   - Production tools (always registered): `request_decision`, `request_input` (also covers free-text feedback), and the no-prompt `report_capabilities`
@@ -58,5 +54,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **CiDebugMcp** — The auth-failure retry elicitation now fires: the server wires `McpServer.Transport` (previously missing), so authentication failures can prompt the user instead of always falling through to the STOP error.
-- **McpSharp** — The two-prompt persistence follow-up (`PolicyDispatch`) now honors the configured elicitation timeout instead of being able to block indefinitely.
+- **CiDebugMcp** — Authentication-failure retries prompt the user via elicitation (the server wires `McpServer.Transport`) instead of failing straight to a STOP error.
+- **McpSharp** — The two-prompt persistence follow-up (`PolicyDispatch`) honors the configured elicitation timeout rather than blocking indefinitely.
