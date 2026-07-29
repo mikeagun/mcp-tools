@@ -2,14 +2,15 @@
 
 ## Repository Overview
 
-This repository contains a shared MCP protocol library and three MCP servers for AI-assisted development workflows. All projects are .NET 9 and communicate via JSON-RPC 2.0 over stdio.
+This repository contains a shared MCP protocol library and four MCP servers for AI-assisted development workflows. All projects are .NET 9 and communicate via JSON-RPC 2.0 over stdio.
 
 | Project | Location | Description |
 |---------|----------|-------------|
-| **McpSharp** | `src/McpSharp/` | Shared MCP protocol library — JSON-RPC 2.0 transport, tool/resource/prompt registry |
+| **McpSharp** | `src/McpSharp/` | Shared MCP protocol library — JSON-RPC 2.0 transport, tool/resource/prompt registry, elicitation engine, progress reporting, policy framework |
 | **HyperVMcp** | `src/HyperVMcp/` | Hyper-V VM management — lifecycle, remote execution, file transfers, diagnostics |
 | **CiDebugMcp** | `src/CiDebugMcp/` | CI/CD failure investigation — log search, failure triage, artifact downloads |
 | **MsBuildMcp** | `src/MsBuildMcp/` | MSBuild project exploration — solution/project evaluation, dependency graphs, builds |
+| **ElicitMcp** | `src/ElicitMcp/` | Agent-facing elicitation — decision/input tools plus a form-mode conformance/showcase harness |
 
 ## Quick Reference
 
@@ -20,13 +21,15 @@ This repository contains a shared MCP protocol library and three MCP servers for
 | Run HyperVMcp | `dotnet run --project src/HyperVMcp` |
 | Run CiDebugMcp | `dotnet run --project src/CiDebugMcp` |
 | Run MsBuildMcp | `dotnet run --project src/MsBuildMcp` |
+| Run ElicitMcp | `dotnet run --project src/ElicitMcp` |
 | Publish HyperVMcp | `dotnet publish src/HyperVMcp -c Release -o publish/hyperv-mcp` |
 | Publish CiDebugMcp | `dotnet publish src/CiDebugMcp -c Release -o publish/ci-debug-mcp` |
 | Publish MsBuildMcp | `dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp` |
+| Publish ElicitMcp | `dotnet publish src/ElicitMcp -c Release -o publish/elicit-mcp` |
 
 ## Dependency Structure
 
-All three servers depend on McpSharp via direct project references (`src/McpSharp/McpSharp.csproj`). Changes to McpSharp affect all servers — run the full test suite after any McpSharp change.
+All four servers depend on McpSharp via direct project references (`src/McpSharp/McpSharp.csproj`). Changes to McpSharp affect all servers — run the full test suite after any McpSharp change.
 
 ---
 
@@ -36,9 +39,12 @@ All three servers depend on McpSharp via direct project references (`src/McpShar
 
 ```
 src/McpSharp/
-├── McpServer.cs      # Registry + JSON-RPC dispatch (tools, resources, prompts)
-├── McpTransport.cs   # stdio transport with Content-Length/NDJSON auto-detection
-└── McpTypes.cs       # ToolInfo, ResourceInfo, PromptInfo, PromptArgument
+├── McpServer.cs      # Registry + JSON-RPC dispatch (tools, resources, prompts, elicitation)
+├── McpTransport.cs   # stdio transport (Content-Length/NDJSON auto-detection) + progress keepalive
+├── McpTypes.cs       # ToolInfo, ResourceInfo, PromptInfo, ElicitationCapabilities/Result
+├── Progress.cs       # IProgressReporter, McpProgress (ambient), ProgressSession (keepalive)
+├── Elicitation/      # Form-mode engine: FormSchemaBuilder, ElicitationPlanner, ElicitationDriver, FormValidator
+└── Policy/           # PolicyEngine, PolicyDispatch, PolicyConfig, IToolClassifier/IRuleMatcher/IOptionGenerator
 ```
 
 ## Key Design Decisions
@@ -80,6 +86,12 @@ The transport auto-detects Content-Length vs NDJSON framing from the first non-w
 - Requests with `id` get responses; notifications (no `id`) do not
 - Unknown methods throw `InvalidOperationException` → JSON-RPC error code -32603
 - `notifications/initialized` and `notifications/cancelled` are silently accepted
+
+### Form-Mode Elicitation (`McpSharp.Elicitation`)
+`McpServer.Elicit(...)` sends a `2025-11-25` form-mode elicitation to the client and returns an `ElicitationResult` (null when the client did not advertise form mode). The dependency-free engine is split into `FormSchemaBuilder` (schema construction, flat-object + sensitive-field guards), `ElicitationPlanner` (single-shot F1/F4/F5/F6 rewrites), `ElicitationDriver` (F2/F3/F8 round-trips + decision-field deny-safety), and `FormValidator` (server-side validation). Capabilities are parsed at `initialize`; an empty `elicitation: {}` means form-only.
+
+### Progress Reporting (`McpProgress`)
+Long-running `tools/call` handlers report progress via the ambient `McpProgress.Current` — `Report(...)` (push) or `SetStatusProvider(...)` (pull). The transport runs a per-call keepalive timer (heartbeat + change-dedupe + idle backstop) whenever the client sends a `progressToken`, so client timeouts don't fire during long operations. It is a no-op when no token is present, so handlers can report unconditionally.
 
 ## Code Conventions
 
@@ -408,3 +420,64 @@ Exceptions thrown by tool handlers are caught by McpServer and returned as MCP e
 - **ItemDefinitionGroup**: ClCompile/Link/Lib/Midl metadata is only extracted for C++ projects (projects with `ClCompile` items). WiX and C# projects skip this to avoid spurious inherited settings.
 - **Central Package Management (CPM)**: When `PackageReference` has no Version, check `PackageVersion` items from `Directory.Packages.props`. See `ExtractPackageReferences()`.
 - **Build collision**: Only one build runs at a time. If a build is already running, the `build` tool polls it instead of starting a new one, and reports a `collision` if targets differ.
+
+---
+
+# ElicitMcp
+
+## Architecture
+
+```
+src/ElicitMcp/
+├── Program.cs                   # Entry point — transport with concurrent dispatch, demo-mode gating
+└── Tools/
+    ├── ToolRegistration.cs      # Registers production tools; adds demo tools when ELICIT_MCP_DEMO_MODE=1
+    ├── AgentTools.cs            # request_decision, request_input (production)
+    ├── HarnessTools.cs          # report_capabilities (production), run_conformance (demo)
+    └── DemoTools.cs             # elicit_demo (demo)
+```
+
+ElicitMcp is a thin agent-facing wrapper over the `McpSharp.Elicitation` engine. It
+registers **5 tools**: `request_decision`, `request_input`, and the no-prompt
+`report_capabilities` (always), plus `elicit_demo` and `run_conformance` (only when
+`ELICIT_MCP_DEMO_MODE=1`).
+
+## Key Design Decisions
+
+### Deliberately Small Production Surface
+Only `request_decision`, `request_input`, and `report_capabilities` register by default,
+so a connected agent is not flooded with demo tools. The conformance/showcase harness
+(`elicit_demo`, `run_conformance`) is gated behind `ELICIT_MCP_DEMO_MODE=1` to avoid
+accidental prompt storms.
+
+### Decision-Field Deny-Safety
+`request_decision` is the only path that marks a field as the decision field. An
+omitted/declined/cancelled decision is never recorded (`decision_made = false`); an
+explicit value — even a negative one like "Deny" — sets `decision_made = true`, so
+callers MUST read the returned `decision`/`selections` value rather than trusting
+`decision_made` alone.
+
+### Sensitive-Field Guard
+`request_input` refuses sensitive field names (`password`/`token`/`api_key`/…) in form
+mode (inherited from `FormSchemaBuilder`); use a secure out-of-band flow for credentials.
+
+### Concurrent Dispatch, No Policy Layer
+The entry point runs the transport with `concurrent: true` so blocking, user-interactive
+elicitation tools don't starve the request loop. The server has no state-modifying
+operations, so it has no policy/guardrail layer.
+
+## Testing Conventions
+
+Tests are in `tests/ElicitMcp.Tests/` and cover tool registration, demo-mode gating,
+decision-field deny-safety, the sensitive-field guard, and the conformance harness —
+all without a live client.
+
+## Common Pitfalls
+
+- **Demo tools are off by default**: `elicit_demo`/`run_conformance` register only when
+  `ELICIT_MCP_DEMO_MODE=1`. `report_capabilities` reports `demo_mode_active` so a
+  conformance client can discover whether the harness is available.
+- **`decision_made` ≠ which decision**: it only signals that *a* choice was made; read
+  the `decision`/`selections` value to act on it. A negative option still returns
+  `decision_made = true`.
+- **URL mode is not implemented**: only form-mode elicitation is supported.
