@@ -1,6 +1,6 @@
 # ci-debug-mcp
 
-MCP server for CI/CD failure investigation — search logs, triage failures, download artifacts, and analyze binary dependencies.
+MCP server for CI/CD failure investigation across **GitHub Actions** and **Azure DevOps** — search logs, triage failures, download artifacts, and analyze binary dependencies.
 
 ## Prerequisites
 
@@ -16,7 +16,7 @@ dotnet build
 ## Testing
 
 ```bash
-dotnet test    # 135 tests
+dotnet test
 ```
 
 ## Tools
@@ -26,7 +26,7 @@ dotnet test    # 135 tests
 | `get_ci_failures` | Unified entry point: find CI failures by PR, run, branch, SHA, or URL. Control verbosity with `detail` level. Returns structured errors, failure classification, test summaries, and hints. |
 | `search_job_logs` | Regex search within a job's full log with context lines and parsed error info. Step-scoped via `step_name` or `step_number`. |
 | `get_step_logs` | Get one step's log output by name or number. Use `pattern` to center around matches. Defaults to the last failed step. |
-| `download_artifact` | Download CI build artifacts. Supports parallel async downloads, selective ZIP extraction, and PR-based resolution. |
+| `download_artifact` | Download CI build artifacts. Supports parallel async downloads, selective ZIP extraction, and PR-based resolution. Reports byte-level progress to clients that pass a `progressToken`. |
 | `analyze_binary_deps` | DLL dependency analysis via dumpbin, optional baseline comparison. |
 | `update_binary_baselines` | Regenerate dependency baseline files from build output. Auto-discovers mappings from `scripts_dir`. |
 

@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server for managing Hyper-V virtual machines and
 
 ## What It Does
 
-Provides **25 structured tools** for VM lifecycle management, remote command execution, file transfers, and system diagnostics — all accessible to LLM agents via the MCP protocol over stdio. Key capabilities:
+Provides **26 structured tools** for VM lifecycle management, remote command execution, file transfers, and system diagnostics — all accessible to LLM agents via the MCP protocol over stdio. Key capabilities:
 
 - **VM lifecycle** — start, stop, restart, checkpoint, and restore VMs (with parallel bulk operations)
 - **Remote execution** — run PowerShell commands on VMs via PSDirect or WinRM sessions with streaming output
@@ -317,7 +317,9 @@ Tests are located at `tests/HyperVMcp.Tests/`.
 
 **Dual output modes**: Commands support `full` mode (retains up to 50K lines, searchable, supports range queries) or `tail` mode (ring buffer of last 1K lines, lightweight). The `save_to` parameter streams all output to disk as lines arrive, independent of retention mode.
 
-**Async command model**: Commands return immediately with a `command_id`. Agents poll via `get_command_status` with optional `since_line` for delta updates. Event-based signaling (`WaitForNews`) detects new output or completion without busy-polling.
+**Command output format**: The `output_format` parameter on `invoke_command`/`run_script` controls PowerShell rendering — `none` (default, raw streaming), `text` (piped through `Out-String` for tabular output), or `json` (piped through `ConvertTo-Json`).
+
+**Async command model**: Commands return immediately with a `command_id`. Agents poll via `get_command_status` with optional `since_line` for delta updates. Event-based signaling (`WaitForNews`) detects new output or completion without busy-polling. Long-running commands also emit live progress (output-line counts) to MCP clients that pass a `progressToken`.
 
 **Connection retry logic**: PSDirect connections retry up to 10 times (3-second intervals) to handle VM boot windows. WinRM defaults to 2 retries. Credential errors are capped at 3 retries. The `max_retries` parameter on `connect_vm` overrides the defaults.
 
