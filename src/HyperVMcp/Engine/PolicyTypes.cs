@@ -96,6 +96,13 @@ public sealed class ToolCallContext
 }
 
 /// <summary>
+/// Immutable policy identity retained with a command or transfer job.
+/// </summary>
+/// <param name="SessionId">The session that originated the job.</param>
+/// <param name="VmName">The VM or remote computer targeted by the job.</param>
+public sealed record CommandPolicyContext(string SessionId, string VmName);
+
+/// <summary>
 /// Host path restriction configuration.
 /// Each field is a list of glob patterns for allowed paths.
 /// </summary>

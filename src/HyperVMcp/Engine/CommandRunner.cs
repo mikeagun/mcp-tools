@@ -8,8 +8,8 @@ using McpSharp;
 namespace HyperVMcp.Engine;
 
 /// <summary>
-/// Manages long-running command execution on VMs.
-/// Supports multiple concurrent commands per session and across sessions.
+/// Manages asynchronous VM command and host-side transfer jobs.
+/// Supports multiple concurrent jobs per session and across sessions.
 /// Follows the BuildManager pattern from msbuild-mcp.
 /// </summary>
 public sealed class CommandRunner : IDisposable
@@ -38,7 +38,7 @@ public sealed class CommandRunner : IDisposable
         string outputFormat = "text", int? hardTimeoutSecs = null,
         string outputMode = "full", string? saveTo = null)
     {
-        _sessionManager.GetSession(sessionId);
+        var vmName = _sessionManager.GetSession(sessionId).VmName;
 
         var activeCount = _commands.Values.Count(c =>
             c.SessionId == sessionId && c.Status == CommandStatus.Running);
@@ -48,7 +48,7 @@ public sealed class CommandRunner : IDisposable
                 $"Wait for a command to complete or increase the limit.");
 
         var commandId = $"cmd-{Interlocked.Increment(ref _commandCounter)}";
-        var job = new CommandJob(commandId, sessionId, command, outputMode, saveTo);
+        var job = new CommandJob(commandId, sessionId, vmName, command, outputMode, saveTo);
 
         _commands[commandId] = job;
 
@@ -92,7 +92,7 @@ public sealed class CommandRunner : IDisposable
     }
 
     /// <summary>
-    /// Get a command by ID.
+    /// Get a retained command or transfer job by ID.
     /// </summary>
     public CommandJob? GetCommand(string commandId)
     {
@@ -101,7 +101,23 @@ public sealed class CommandRunner : IDisposable
     }
 
     /// <summary>
-    /// List all commands, optionally filtered by session.
+    /// Resolve immutable policy identity for a retained command or transfer job.
+    /// </summary>
+    /// <param name="commandId">The process-local command or transfer job identifier.</param>
+    /// <returns>The retained policy context, or <see langword="null"/> if the job is absent.</returns>
+    public CommandPolicyContext? GetPolicyContext(string commandId)
+    {
+        var job = GetCommand(commandId);
+        return job == null ? null : new CommandPolicyContext(job.SessionId, job.VmName);
+    }
+
+    internal static string JobNotFoundMessage(string commandId)
+        => $"Command or transfer job '{commandId}' was not found in this server process. " +
+           "Use an ID returned by invoke_command, run_script, copy_to_vm, or copy_from_vm, " +
+           "or rerun the originating operation.";
+
+    /// <summary>
+    /// List all retained command and transfer jobs, optionally filtered by session.
     /// </summary>
     public IReadOnlyList<CommandSnapshot> ListCommands(string? sessionId = null)
     {
@@ -112,12 +128,12 @@ public sealed class CommandRunner : IDisposable
     }
 
     /// <summary>
-    /// Cancel a running command. Returns the current snapshot.
+    /// Cancel a running command or transfer job. Returns the current snapshot.
     /// </summary>
     public CommandSnapshot CancelCommand(string commandId)
     {
         var job = GetCommand(commandId)
-            ?? throw new InvalidOperationException($"Command '{commandId}' not found. It may have expired — use invoke_command to start a new one.");
+            ?? throw new InvalidOperationException(JobNotFoundMessage(commandId));
 
         if (job.Status == CommandStatus.Running && job.BackendRequestId != null)
         {
@@ -145,14 +161,15 @@ public sealed class CommandRunner : IDisposable
     }
 
     /// <summary>
-    /// Start a host-side transfer command (runs on elevated backend, not wrapped in Invoke-Command).
+    /// Start a host-side transfer job (runs on elevated backend, not wrapped in Invoke-Command).
     /// Returns immediately with a CommandJob that can be polled.
     /// </summary>
     public CommandJob StartTransfer(string script, string description, string sessionId,
         int? hardTimeoutSecs = null, string outputMode = "full", string? saveTo = null)
     {
+        var vmName = _sessionManager.GetSession(sessionId).VmName;
         var commandId = $"xfer-{Interlocked.Increment(ref _commandCounter)}";
-        var job = new CommandJob(commandId, sessionId, description, outputMode, saveTo);
+        var job = new CommandJob(commandId, sessionId, vmName, description, outputMode, saveTo);
         _commands[commandId] = job;
 
         job.ExecutionTask = Task.Run(async () =>
@@ -192,12 +209,12 @@ public sealed class CommandRunner : IDisposable
     }
 
     /// <summary>
-    /// Free a command's output buffer to release memory.
+    /// Free a command or transfer job's output buffer to release memory.
     /// </summary>
     public int FreeCommandOutput(string commandId)
     {
         var job = GetCommand(commandId)
-            ?? throw new InvalidOperationException($"Command '{commandId}' not found. It may have expired — use invoke_command to start a new one.");
+            ?? throw new InvalidOperationException(JobNotFoundMessage(commandId));
         return job.Output.Free();
     }
 
