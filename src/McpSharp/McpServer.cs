@@ -61,6 +61,7 @@ public sealed class McpServer
             "resources/read" => HandleResourcesRead(parameters),
             "prompts/list" => HandlePromptsList(),
             "prompts/get" => HandlePromptsGet(parameters),
+            "server/discover" => HandleDiscover(),
             "notifications/initialized" or "notifications/cancelled" => null,
             _ => throw new InvalidOperationException($"Unknown method: {method}")
         };
@@ -174,6 +175,31 @@ public sealed class McpServer
             : null;
 
         return new ElicitationResult { Action = action, Content = content };
+    }
+
+    // ── Discover ─────────────────────────────────────────────────
+
+    private JsonNode HandleDiscover()
+    {
+        return new JsonObject
+        {
+            ["resultType"] = "complete",
+            ["supportedVersions"] = new JsonArray("2025-06-18"),
+            ["capabilities"] = new JsonObject
+            {
+                ["tools"] = new JsonObject(),
+                ["resources"] = new JsonObject(),
+                ["prompts"] = new JsonObject(),
+            },
+            ["_meta"] = new JsonObject
+            {
+                ["io.modelcontextprotocol/serverInfo"] = new JsonObject
+                {
+                    ["name"] = _name,
+                    ["version"] = _version,
+                },
+            },
+        };
     }
 
     // ── Initialize ──────────────────────────────────────────────

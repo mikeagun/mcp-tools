@@ -1050,4 +1050,47 @@ public class McpTransportTests
         for (var i = 1; i < counts.Count; i++)
             Assert.True(counts[i] > counts[i - 1], "progress counter must be monotonic");
     }
+
+    // ── server/discover integration ─────────────────────────────
+
+    [Fact]
+    public void Ndjson_DiscoverThenInitializeThenToolsList()
+    {
+        var server = new McpServer("disco-test", "1.0.0");
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "ping",
+            Description = "Ping tool",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ => new JsonObject { ["pong"] = true },
+        });
+
+        var input = MakeNdjsonInput(
+            MakeJsonRpcRequest(1, "server/discover"),
+            MakeJsonRpcRequest(2, "initialize"),
+            MakeJsonRpcNotification("notifications/initialized"),
+            MakeJsonRpcRequest(3, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+        server.Transport = transport;
+
+        transport.Run(server.Dispatch);
+
+        var responses = ParseNdjsonOutput(output);
+        Assert.Equal(3, responses.Count);
+
+        // discover response
+        var discover = responses[0]["result"]!;
+        Assert.Equal("complete", discover["resultType"]!.GetValue<string>());
+        Assert.Equal("2025-06-18", discover["supportedVersions"]![0]!.GetValue<string>());
+
+        // initialize response
+        var init = responses[1]["result"]!;
+        Assert.Equal("2025-06-18", init["protocolVersion"]!.GetValue<string>());
+
+        // tools/list response
+        var tools = responses[2]["result"]!["tools"]!.AsArray();
+        Assert.Single(tools);
+        Assert.Equal("ping", tools[0]!["name"]!.GetValue<string>());
+    }
 }
