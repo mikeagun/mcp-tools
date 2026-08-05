@@ -104,6 +104,64 @@ public class McpServerTests
         Assert.Equal("2.0.1", meta["version"]!.GetValue<string>());
     }
 
+    // ── resultType ────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("server/discover")]
+    [InlineData("initialize")]
+    [InlineData("tools/list")]
+    [InlineData("resources/list")]
+    [InlineData("prompts/list")]
+    public void AllListMethods_ReturnResultTypeComplete(string method)
+    {
+        var server = CreateServer();
+        var result = server.Dispatch(method, null)!;
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ToolsCall_ReturnsResultTypeComplete()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool());
+        var result = server.Dispatch("tools/call", new JsonObject
+        {
+            ["name"] = "echo",
+            ["arguments"] = new JsonObject { ["input"] = "hi" },
+        })!;
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ResourcesRead_ReturnsResultTypeComplete()
+    {
+        var server = CreateServer();
+        server.RegisterResource(new ResourceInfo
+        {
+            Uri = "test://r",
+            Name = "r",
+            Description = "d",
+            MimeType = "text/plain",
+            Reader = () => JsonNode.Parse("\"hello\""),
+        });
+        var result = server.Dispatch("resources/read", new JsonObject { ["uri"] = "test://r" })!;
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void PromptsGet_ReturnsResultTypeComplete()
+    {
+        var server = CreateServer();
+        server.RegisterPrompt(new PromptInfo
+        {
+            Name = "test",
+            Description = "d",
+            Handler = _ => new JsonArray(new JsonObject { ["role"] = "user", ["content"] = "hi" }),
+        });
+        var result = server.Dispatch("prompts/get", new JsonObject { ["name"] = "test" })!;
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+    }
+
     // ── Initialize ──────────────────────────────────────────────
 
     [Fact]
