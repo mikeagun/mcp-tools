@@ -213,6 +213,7 @@ public sealed class McpServer
 
         return new JsonObject
         {
+            ["resultType"] = "complete",
             ["protocolVersion"] = "2025-06-18",
             ["capabilities"] = new JsonObject
             {
@@ -240,7 +241,7 @@ public sealed class McpServer
                 ["inputSchema"] = JsonNode.Parse(tool.InputSchema.ToJsonString()),
             });
         }
-        return new JsonObject { ["tools"] = arr };
+        return new JsonObject { ["resultType"] = "complete", ["tools"] = arr };
     }
 
     private JsonNode HandleToolsCall(JsonNode? parameters)
@@ -262,6 +263,7 @@ public sealed class McpServer
                 var text = result?.ToJsonString() ?? "null";
                 return new JsonObject
                 {
+                    ["resultType"] = "complete",
                     ["content"] = new JsonArray
                     {
                         new JsonObject { ["type"] = "text", ["text"] = text }
@@ -361,7 +363,7 @@ public sealed class McpServer
                 ["mimeType"] = res.MimeType,
             });
         }
-        return new JsonObject { ["resources"] = arr };
+        return new JsonObject { ["resultType"] = "complete", ["resources"] = arr };
     }
 
     private JsonNode HandleResourcesRead(JsonNode? parameters)
@@ -376,6 +378,7 @@ public sealed class McpServer
         var text = content?.ToJsonString() ?? "null";
         return new JsonObject
         {
+            ["resultType"] = "complete",
             ["contents"] = new JsonArray
             {
                 new JsonObject
@@ -414,7 +417,7 @@ public sealed class McpServer
             }
             arr.Add(p);
         }
-        return new JsonObject { ["prompts"] = arr };
+        return new JsonObject { ["resultType"] = "complete", ["prompts"] = arr };
     }
 
     private JsonNode HandlePromptsGet(JsonNode? parameters)
@@ -429,6 +432,7 @@ public sealed class McpServer
         var messages = prompt.Handler(arguments);
         return new JsonObject
         {
+            ["resultType"] = "complete",
             ["description"] = prompt.Description,
             ["messages"] = messages,
         };
