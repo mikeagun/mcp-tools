@@ -62,6 +62,48 @@ public class McpServerTests
         };
     }
 
+    // ── Discover ────────────────────────────────────────────────
+
+    [Fact]
+    public void Discover_ReturnsSupportedVersions()
+    {
+        var server = CreateServer("my-server");
+        var result = server.Dispatch("server/discover", null)!;
+
+        var versions = result["supportedVersions"]!.AsArray();
+        Assert.Single(versions);
+        Assert.Equal("2025-06-18", versions[0]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Discover_ReturnsResultTypeComplete()
+    {
+        var result = CreateServer().Dispatch("server/discover", null)!;
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Discover_ReturnsCapabilities()
+    {
+        var result = CreateServer().Dispatch("server/discover", null)!;
+        var caps = result["capabilities"]!;
+
+        Assert.NotNull(caps["tools"]);
+        Assert.NotNull(caps["resources"]);
+        Assert.NotNull(caps["prompts"]);
+    }
+
+    [Fact]
+    public void Discover_ReturnsServerInfoInMeta()
+    {
+        var server = new McpServer("discover-test", "2.0.1");
+        var result = server.Dispatch("server/discover", null)!;
+
+        var meta = result["_meta"]!["io.modelcontextprotocol/serverInfo"]!;
+        Assert.Equal("discover-test", meta["name"]!.GetValue<string>());
+        Assert.Equal("2.0.1", meta["version"]!.GetValue<string>());
+    }
+
     // ── Initialize ──────────────────────────────────────────────
 
     [Fact]
