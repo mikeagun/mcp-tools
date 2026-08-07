@@ -1,6 +1,7 @@
 // Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 
 namespace McpSharp;
@@ -11,9 +12,9 @@ namespace McpSharp;
 /// </summary>
 public sealed class McpServer
 {
-    private readonly Dictionary<string, ToolInfo> _tools = new();
-    private readonly Dictionary<string, ResourceInfo> _resources = new();
-    private readonly Dictionary<string, PromptInfo> _prompts = new();
+    private readonly ConcurrentDictionary<string, ToolInfo> _tools = new();
+    private readonly ConcurrentDictionary<string, ResourceInfo> _resources = new();
+    private readonly ConcurrentDictionary<string, PromptInfo> _prompts = new();
     private readonly string _name;
     private readonly string _version;
     private long _nextServerRequestId;
@@ -55,6 +56,77 @@ public sealed class McpServer
     /// </summary>
     public Func<ToolInfo, RequestContext, bool>? ToolFilter { get; set; }
 
+    // ── Subscription state ──────────────────────────────────────
+
+    private readonly Dictionary<string, Subscription> _subscriptions = new();
+    private readonly Lock _subscriptionLock = new();
+
+    /// <summary>
+    /// Register a tool dynamically after server startup. Fires
+    /// <c>notifications/tools/list_changed</c> to all subscribed clients.
+    /// </summary>
+    public void AddTool(ToolInfo tool)
+    {
+        _tools[tool.Name] = tool;
+        NotifyToolsChanged();
+    }
+
+    /// <summary>
+    /// Remove a tool dynamically. Fires <c>notifications/tools/list_changed</c>
+    /// to all subscribed clients. Returns true if the tool existed.
+    /// </summary>
+    public bool RemoveTool(string name)
+    {
+        if (!_tools.TryRemove(name, out _))
+            return false;
+        NotifyToolsChanged();
+        return true;
+    }
+
+    /// <summary>
+    /// Register a resource dynamically after server startup. Fires
+    /// <c>notifications/resources/list_changed</c> to all subscribed clients.
+    /// </summary>
+    public void AddResource(ResourceInfo resource)
+    {
+        _resources[resource.Uri] = resource;
+        NotifyResourcesChanged();
+    }
+
+    /// <summary>
+    /// Remove a resource dynamically. Fires <c>notifications/resources/list_changed</c>
+    /// to all subscribed clients. Returns true if the resource existed.
+    /// </summary>
+    public bool RemoveResource(string uri)
+    {
+        if (!_resources.TryRemove(uri, out _))
+            return false;
+        NotifyResourcesChanged();
+        return true;
+    }
+
+    /// <summary>
+    /// Register a prompt dynamically after server startup. Fires
+    /// <c>notifications/prompts/list_changed</c> to all subscribed clients.
+    /// </summary>
+    public void AddPrompt(PromptInfo prompt)
+    {
+        _prompts[prompt.Name] = prompt;
+        NotifyPromptsChanged();
+    }
+
+    /// <summary>
+    /// Remove a prompt dynamically. Fires <c>notifications/prompts/list_changed</c>
+    /// to all subscribed clients. Returns true if the prompt existed.
+    /// </summary>
+    public bool RemovePrompt(string name)
+    {
+        if (!_prompts.TryRemove(name, out _))
+            return false;
+        NotifyPromptsChanged();
+        return true;
+    }
+
     public void RegisterTool(ToolInfo tool) => _tools[tool.Name] = tool;
     public void RegisterResource(ResourceInfo resource) => _resources[resource.Uri] = resource;
     public void RegisterPrompt(PromptInfo prompt) => _prompts[prompt.Name] = prompt;
@@ -71,7 +143,9 @@ public sealed class McpServer
             "prompts/list" => HandlePromptsList(),
             "prompts/get" => HandlePromptsGet(parameters),
             "server/discover" => HandleDiscover(),
-            "notifications/initialized" or "notifications/cancelled" => null,
+            "subscriptions/listen" => HandleSubscriptionsListen(parameters),
+            "notifications/initialized" => null,
+            "notifications/cancelled" => HandleNotificationsCancelled(parameters),
             _ => throw new InvalidOperationException($"Unknown method: {method}")
         };
     }
@@ -226,9 +300,9 @@ public sealed class McpServer
             ["protocolVersion"] = "2025-06-18",
             ["capabilities"] = new JsonObject
             {
-                ["tools"] = new JsonObject(),
-                ["resources"] = new JsonObject(),
-                ["prompts"] = new JsonObject(),
+                ["tools"] = new JsonObject { ["listChanged"] = true },
+                ["resources"] = new JsonObject { ["listChanged"] = true },
+                ["prompts"] = new JsonObject { ["listChanged"] = true },
             },
             ["serverInfo"] = new JsonObject
             {
@@ -242,7 +316,7 @@ public sealed class McpServer
     {
         var ctx = RequestContext.Parse(parameters);
         var arr = new JsonArray();
-        foreach (var tool in _tools.Values)
+        foreach (var tool in _tools.Values.OrderBy(t => t.Name))
         {
             if (ToolFilter != null && !ToolFilter(tool, ctx))
                 continue;
@@ -382,7 +456,7 @@ public sealed class McpServer
     private JsonNode HandleResourcesList()
     {
         var arr = new JsonArray();
-        foreach (var res in _resources.Values)
+        foreach (var res in _resources.Values.OrderBy(r => r.Uri))
         {
             arr.Add(new JsonObject
             {
@@ -423,7 +497,7 @@ public sealed class McpServer
     private JsonNode HandlePromptsList()
     {
         var arr = new JsonArray();
-        foreach (var prompt in _prompts.Values)
+        foreach (var prompt in _prompts.Values.OrderBy(p => p.Name))
         {
             var p = new JsonObject
             {
@@ -465,5 +539,182 @@ public sealed class McpServer
             ["description"] = prompt.Description,
             ["messages"] = messages,
         };
+    }
+
+    // ── Subscriptions ───────────────────────────────────────────
+
+    /// <summary>
+    /// Sentinel value returned by HandleSubscriptionsListen to signal the transport
+    /// that the response was already handled (the request is long-lived).
+    /// </summary>
+    internal static readonly JsonObject DeferredResponseSentinel = new() { ["__deferred"] = true };
+
+    private JsonNode? HandleSubscriptionsListen(JsonNode? parameters)
+    {
+        if (Transport == null)
+            throw new InvalidOperationException("subscriptions/listen requires an active transport");
+
+        // The request ID is needed to correlate this subscription. We pass it
+        // via a well-known _meta key injected by the transport.
+        var requestIdNode = parameters?["_meta"]?["__requestId"]
+            ?? throw new ArgumentException("Missing request ID for subscription");
+        var requestId = requestIdNode.ToString();
+        var requestIdJson = requestIdNode.ToJsonString();
+
+        var notifications = parameters?["notifications"]?.AsObject();
+        var sub = new Subscription
+        {
+            RequestId = requestId,
+            RequestIdJson = requestIdJson,
+            ToolsListChanged = notifications?["toolsListChanged"]?.GetValue<bool>() == true,
+            PromptsListChanged = notifications?["promptsListChanged"]?.GetValue<bool>() == true,
+            ResourcesListChanged = notifications?["resourcesListChanged"]?.GetValue<bool>() == true,
+        };
+
+        lock (_subscriptionLock)
+        {
+            _subscriptions[requestId] = sub;
+        }
+
+        // Send the acknowledgment notification with the agreed filter.
+        var ackedNotifications = new JsonObject();
+        if (sub.ToolsListChanged) ackedNotifications["toolsListChanged"] = true;
+        if (sub.PromptsListChanged) ackedNotifications["promptsListChanged"] = true;
+        if (sub.ResourcesListChanged) ackedNotifications["resourcesListChanged"] = true;
+
+        Transport.WriteMessage(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["method"] = "notifications/subscriptions/acknowledged",
+            ["params"] = new JsonObject
+            {
+                ["_meta"] = new JsonObject
+                {
+                    ["io.modelcontextprotocol/subscriptionId"] = JsonNode.Parse(requestIdJson),
+                },
+                ["notifications"] = ackedNotifications,
+            },
+        });
+
+        // Return sentinel — the transport must NOT send a response for this request.
+        // The response is sent later when the subscription closes (graceful closure).
+        return DeferredResponseSentinel;
+    }
+
+    private JsonNode? HandleNotificationsCancelled(JsonNode? parameters)
+    {
+        var cancelledId = parameters?["requestId"]?.ToString();
+        if (cancelledId != null)
+        {
+            Subscription? sub;
+            lock (_subscriptionLock)
+            {
+                _subscriptions.Remove(cancelledId, out sub);
+            }
+
+            // Send the graceful closure response for the subscription.
+            if (sub != null && Transport != null)
+            {
+                Transport.WriteMessage(new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"] = JsonNode.Parse(sub.RequestIdJson),
+                    ["result"] = new JsonObject
+                    {
+                        ["resultType"] = "complete",
+                        ["_meta"] = new JsonObject
+                        {
+                            ["io.modelcontextprotocol/subscriptionId"] = JsonNode.Parse(sub.RequestIdJson),
+                        },
+                    },
+                });
+            }
+        }
+        return null;
+    }
+
+    private void NotifyToolsChanged()
+    {
+        NotifyListChanged("notifications/tools/list_changed", s => s.ToolsListChanged);
+    }
+
+    private void NotifyResourcesChanged()
+    {
+        NotifyListChanged("notifications/resources/list_changed", s => s.ResourcesListChanged);
+    }
+
+    private void NotifyPromptsChanged()
+    {
+        NotifyListChanged("notifications/prompts/list_changed", s => s.PromptsListChanged);
+    }
+
+    private void NotifyListChanged(string method, Func<Subscription, bool> filter)
+    {
+        if (Transport == null) return;
+
+        List<Subscription> subs;
+        lock (_subscriptionLock)
+        {
+            subs = _subscriptions.Values.Where(filter).ToList();
+        }
+
+        foreach (var sub in subs)
+        {
+            Transport.WriteMessage(new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["method"] = method,
+                ["params"] = new JsonObject
+                {
+                    ["_meta"] = new JsonObject
+                    {
+                        ["io.modelcontextprotocol/subscriptionId"] = JsonNode.Parse(sub.RequestIdJson),
+                    },
+                },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Close all active subscriptions (sends graceful closure responses).
+    /// Call during server shutdown before stopping the transport.
+    /// </summary>
+    public void CloseAllSubscriptions()
+    {
+        if (Transport == null) return;
+
+        List<Subscription> subs;
+        lock (_subscriptionLock)
+        {
+            subs = [.. _subscriptions.Values];
+            _subscriptions.Clear();
+        }
+
+        foreach (var sub in subs)
+        {
+            Transport.WriteMessage(new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = JsonNode.Parse(sub.RequestIdJson),
+                ["result"] = new JsonObject
+                {
+                    ["resultType"] = "complete",
+                    ["_meta"] = new JsonObject
+                    {
+                        ["io.modelcontextprotocol/subscriptionId"] = JsonNode.Parse(sub.RequestIdJson),
+                    },
+                },
+            });
+        }
+    }
+
+    private sealed class Subscription
+    {
+        public required string RequestId { get; init; }
+        /// <summary>The request ID as a JSON literal for embedding in responses.</summary>
+        public required string RequestIdJson { get; init; }
+        public bool ToolsListChanged { get; init; }
+        public bool PromptsListChanged { get; init; }
+        public bool ResourcesListChanged { get; init; }
     }
 }

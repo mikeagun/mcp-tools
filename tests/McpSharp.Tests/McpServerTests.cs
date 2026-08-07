@@ -562,6 +562,316 @@ public class McpServerTests
         Assert.Single(list);
     }
 
+    // ── Dynamic Tools & Subscriptions ───────────────────────────
+
+    [Fact]
+    public void AddTool_AddsToRegistry()
+    {
+        var server = CreateServer();
+        Assert.Empty(server.Dispatch("tools/list", null)!["tools"]!.AsArray());
+
+        server.AddTool(CreateTool("dynamic"));
+        var tools = server.Dispatch("tools/list", null)!["tools"]!.AsArray();
+        Assert.Single(tools);
+        Assert.Equal("dynamic", tools[0]!["name"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void RemoveTool_RemovesFromRegistry()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("removable"));
+        Assert.Single(server.Dispatch("tools/list", null)!["tools"]!.AsArray());
+
+        Assert.True(server.RemoveTool("removable"));
+        Assert.Empty(server.Dispatch("tools/list", null)!["tools"]!.AsArray());
+    }
+
+    [Fact]
+    public void RemoveTool_ReturnsFalseForUnknown()
+    {
+        var server = CreateServer();
+        Assert.False(server.RemoveTool("nonexistent"));
+    }
+
+    [Fact]
+    public void AddTool_NotifiesSubscribers()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        SubscribeForTools(server, output, "1");
+
+        // Clear the output so we only see the notification
+        output.SetLength(0);
+        server.AddTool(CreateTool("new_tool"));
+
+        var notification = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("notifications/tools/list_changed", notification["method"]!.GetValue<string>());
+        Assert.Equal("1", notification["params"]!["_meta"]!["io.modelcontextprotocol/subscriptionId"]!.ToString());
+    }
+
+    [Fact]
+    public void RemoveTool_NotifiesSubscribers()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        server.RegisterTool(CreateTool("old_tool"));
+        SubscribeForTools(server, output, "2");
+        output.SetLength(0);
+
+        server.RemoveTool("old_tool");
+
+        var notification = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("notifications/tools/list_changed", notification["method"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void SubscriptionsListen_SendsAcknowledgment()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+
+        var result = server.Dispatch("subscriptions/listen", new JsonObject
+        {
+            ["_meta"] = new JsonObject { ["__requestId"] = "sub-1" },
+            ["notifications"] = new JsonObject { ["toolsListChanged"] = true },
+        });
+
+        // Handler returns the deferred sentinel
+        Assert.True(result is JsonObject obj && obj.ContainsKey("__deferred"));
+
+        // Acknowledgment was sent
+        var ack = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("notifications/subscriptions/acknowledged", ack["method"]!.GetValue<string>());
+        Assert.Equal("sub-1", ack["params"]!["_meta"]!["io.modelcontextprotocol/subscriptionId"]!.ToString());
+        Assert.True(ack["params"]!["notifications"]!["toolsListChanged"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void SubscriptionsListen_OnlyAcksRequestedNotifications()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+
+        server.Dispatch("subscriptions/listen", new JsonObject
+        {
+            ["_meta"] = new JsonObject { ["__requestId"] = "sub-2" },
+            ["notifications"] = new JsonObject { ["resourcesListChanged"] = true },
+        });
+
+        var ack = ReadAllNdjsonMessages(output).First();
+        Assert.Null(ack["params"]!["notifications"]!["toolsListChanged"]);
+        Assert.True(ack["params"]!["notifications"]!["resourcesListChanged"]!.GetValue<bool>());
+
+        // Adding a tool should NOT notify this subscriber (only subscribed to resources)
+        output.SetLength(0);
+        server.AddTool(CreateTool("ignored"));
+        Assert.Empty(ReadAllNdjsonMessages(output));
+    }
+
+    [Fact]
+    public void NotificationsCancelled_ClosesSubscription()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        SubscribeForTools(server, output, "3");
+        output.SetLength(0);
+
+        // Cancel the subscription
+        server.Dispatch("notifications/cancelled", new JsonObject { ["requestId"] = "3" });
+
+        // Should get a graceful closure response
+        var closure = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("3", closure["id"]!.ToString());
+        Assert.Equal("complete", closure["result"]!["resultType"]!.GetValue<string>());
+
+        // No more notifications after cancellation
+        output.SetLength(0);
+        server.AddTool(CreateTool("post_cancel"));
+        Assert.Empty(ReadAllNdjsonMessages(output));
+    }
+
+    [Fact]
+    public void CloseAllSubscriptions_ClosesAll()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        SubscribeForTools(server, output, "10");
+        SubscribeForTools(server, output, "11");
+        output.SetLength(0);
+
+        server.CloseAllSubscriptions();
+
+        var messages = ReadAllNdjsonMessages(output);
+        Assert.Equal(2, messages.Count);
+        var ids = messages.Select(m => m["id"]!.ToString()).OrderBy(x => x).ToList();
+        Assert.Equal("10", ids[0]);
+        Assert.Equal("11", ids[1]);
+
+        // No more notifications
+        output.SetLength(0);
+        server.AddTool(CreateTool("after_close"));
+        Assert.Empty(ReadAllNdjsonMessages(output));
+    }
+
+    [Fact]
+    public void Initialize_AdvertisesListChanged()
+    {
+        var server = CreateServer();
+        var result = server.Dispatch("initialize", new JsonObject
+        {
+            ["protocolVersion"] = "2025-06-18",
+            ["capabilities"] = new JsonObject(),
+            ["clientInfo"] = new JsonObject { ["name"] = "test", ["version"] = "1" },
+        })!;
+
+        var toolsCap = result["capabilities"]!["tools"]!;
+        Assert.True(toolsCap["listChanged"]!.GetValue<bool>());
+        var resourcesCap = result["capabilities"]!["resources"]!;
+        Assert.True(resourcesCap["listChanged"]!.GetValue<bool>());
+        var promptsCap = result["capabilities"]!["prompts"]!;
+        Assert.True(promptsCap["listChanged"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void AddPrompt_AddsToRegistryAndNotifies()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        server.Dispatch("subscriptions/listen", new JsonObject
+        {
+            ["_meta"] = new JsonObject { ["__requestId"] = "p1" },
+            ["notifications"] = new JsonObject { ["promptsListChanged"] = true },
+        });
+        output.SetLength(0);
+
+        Assert.Empty(server.Dispatch("prompts/list", null)!["prompts"]!.AsArray());
+        server.AddPrompt(new PromptInfo
+        {
+            Name = "test_prompt",
+            Description = "A test prompt",
+            Handler = _ => new JsonArray(),
+        });
+
+        var prompts = server.Dispatch("prompts/list", null)!["prompts"]!.AsArray();
+        Assert.Single(prompts);
+        Assert.Equal("test_prompt", prompts[0]!["name"]!.GetValue<string>());
+
+        var notification = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("notifications/prompts/list_changed", notification["method"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void RemovePrompt_RemovesAndNotifies()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        server.RegisterPrompt(new PromptInfo
+        {
+            Name = "removable",
+            Description = "Will be removed",
+            Handler = _ => new JsonArray(),
+        });
+        server.Dispatch("subscriptions/listen", new JsonObject
+        {
+            ["_meta"] = new JsonObject { ["__requestId"] = "p2" },
+            ["notifications"] = new JsonObject { ["promptsListChanged"] = true },
+        });
+        output.SetLength(0);
+
+        Assert.True(server.RemovePrompt("removable"));
+        Assert.False(server.RemovePrompt("nonexistent"));
+        Assert.Empty(server.Dispatch("prompts/list", null)!["prompts"]!.AsArray());
+
+        var notification = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("notifications/prompts/list_changed", notification["method"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void AddResource_AddsToRegistryAndNotifies()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        server.Dispatch("subscriptions/listen", new JsonObject
+        {
+            ["_meta"] = new JsonObject { ["__requestId"] = "r1" },
+            ["notifications"] = new JsonObject { ["resourcesListChanged"] = true },
+        });
+        output.SetLength(0);
+
+        server.AddResource(new ResourceInfo
+        {
+            Uri = "test://res",
+            Name = "test_res",
+            Description = "A test resource",
+            Reader = () => new JsonObject { ["data"] = "hello" },
+        });
+
+        var resources = server.Dispatch("resources/list", null)!["resources"]!.AsArray();
+        Assert.Single(resources);
+
+        var notification = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("notifications/resources/list_changed", notification["method"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void RemoveResource_RemovesAndNotifies()
+    {
+        var (server, output) = CreateSubscriptionTestServer();
+        server.RegisterResource(new ResourceInfo
+        {
+            Uri = "test://rem",
+            Name = "rem",
+            Description = "Will be removed",
+            Reader = () => null,
+        });
+        server.Dispatch("subscriptions/listen", new JsonObject
+        {
+            ["_meta"] = new JsonObject { ["__requestId"] = "r2" },
+            ["notifications"] = new JsonObject { ["resourcesListChanged"] = true },
+        });
+        output.SetLength(0);
+
+        Assert.True(server.RemoveResource("test://rem"));
+        Assert.False(server.RemoveResource("nonexistent"));
+
+        var notification = ReadAllNdjsonMessages(output).First();
+        Assert.Equal("notifications/resources/list_changed", notification["method"]!.GetValue<string>());
+    }
+
+    // ── Subscription test helpers ───────────────────────────────
+
+    private static (McpServer server, MemoryStream output) CreateSubscriptionTestServer()
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        // Trigger NDJSON framing detection by reading a dummy message.
+        var dummy = System.Text.Encoding.UTF8.GetBytes("{\"_\":0}\n");
+        input.Write(dummy);
+        input.Position = 0;
+        transport.ReadMessage();
+
+        input.SetLength(0);
+        input.Position = 0;
+        output.SetLength(0);
+        output.Position = 0;
+
+        var server = CreateServer();
+        server.Transport = transport;
+        return (server, output);
+    }
+
+    private static void SubscribeForTools(McpServer server, MemoryStream output, string requestId)
+    {
+        server.Dispatch("subscriptions/listen", new JsonObject
+        {
+            ["_meta"] = new JsonObject { ["__requestId"] = requestId },
+            ["notifications"] = new JsonObject { ["toolsListChanged"] = true },
+        });
+    }
+
+    private static List<JsonNode> ReadAllNdjsonMessages(MemoryStream stream)
+    {
+        stream.Position = 0;
+        var raw = System.Text.Encoding.UTF8.GetString(stream.ToArray());
+        return raw.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonNode.Parse(line.TrimEnd('\r'))!)
+            .ToList();
+    }
+
     // ── Resources ───────────────────────────────────────────────
 
     [Fact]
