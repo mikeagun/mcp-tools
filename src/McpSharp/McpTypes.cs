@@ -14,6 +14,61 @@ public sealed class ToolInfo
     public required string Description { get; init; }
     public required JsonObject InputSchema { get; init; }
     public required Func<JsonObject, JsonNode?> Handler { get; set; }
+
+    /// <summary>Human-readable display title (MCP 2026-07-28).</summary>
+    public string? Title { get; init; }
+
+    /// <summary>JSON Schema defining the tool's structured output (MCP 2026-07-28).</summary>
+    public JsonObject? OutputSchema { get; init; }
+
+    /// <summary>Icons for display in user interfaces (MCP 2026-07-28). Array of {src, mimeType, sizes?}.</summary>
+    public JsonArray? Icons { get; init; }
+}
+
+/// <summary>
+/// Per-request context extracted from the <c>_meta</c> field of an MCP request.
+/// Provides client identity, protocol version, and capabilities without relying
+/// on connection state (MCP 2026-07-28 stateless model).
+/// </summary>
+public sealed class RequestContext
+{
+    /// <summary>Protocol version from <c>io.modelcontextprotocol/protocolVersion</c>.</summary>
+    public string? ProtocolVersion { get; init; }
+
+    /// <summary>Client info from <c>io.modelcontextprotocol/clientInfo</c>.</summary>
+    public JsonObject? ClientInfo { get; init; }
+
+    /// <summary>Client capabilities from <c>io.modelcontextprotocol/clientCapabilities</c>.</summary>
+    public JsonObject? ClientCapabilities { get; init; }
+
+    /// <summary>Progress token from <c>progressToken</c>.</summary>
+    public string? ProgressToken { get; init; }
+
+    /// <summary>The raw <c>_meta</c> object, for access to extension keys.</summary>
+    public JsonObject? RawMeta { get; init; }
+
+    /// <summary>Empty context (no <c>_meta</c> present).</summary>
+    public static readonly RequestContext Empty = new();
+
+    /// <summary>
+    /// Parse <c>_meta</c> from a request's params object. Returns <see cref="Empty"/>
+    /// if params or _meta is absent.
+    /// </summary>
+    public static RequestContext Parse(JsonNode? parameters)
+    {
+        var meta = parameters?["_meta"]?.AsObject();
+        if (meta is null)
+            return Empty;
+
+        return new RequestContext
+        {
+            ProtocolVersion = meta["io.modelcontextprotocol/protocolVersion"]?.GetValue<string>(),
+            ClientInfo = meta["io.modelcontextprotocol/clientInfo"]?.AsObject(),
+            ClientCapabilities = meta["io.modelcontextprotocol/clientCapabilities"]?.AsObject(),
+            ProgressToken = meta["progressToken"]?.ToString(),
+            RawMeta = meta,
+        };
+    }
 }
 
 /// <summary>

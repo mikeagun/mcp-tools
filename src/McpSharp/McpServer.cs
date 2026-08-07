@@ -46,6 +46,15 @@ public sealed class McpServer
         _version = version ?? typeof(McpServer).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
     }
 
+    /// <summary>
+    /// Optional filter invoked during <c>tools/list</c> and <c>tools/call</c>.
+    /// Return true to include the tool for the requesting client.
+    /// Receives the tool and the parsed per-request context (client caps, protocol version).
+    /// When null, all registered tools are visible to all clients.
+    /// Must be thread-safe if the transport uses concurrent dispatch.
+    /// </summary>
+    public Func<ToolInfo, RequestContext, bool>? ToolFilter { get; set; }
+
     public void RegisterTool(ToolInfo tool) => _tools[tool.Name] = tool;
     public void RegisterResource(ResourceInfo resource) => _resources[resource.Uri] = resource;
     public void RegisterPrompt(PromptInfo prompt) => _prompts[prompt.Name] = prompt;
@@ -55,7 +64,7 @@ public sealed class McpServer
         return method switch
         {
             "initialize" => HandleInitialize(parameters),
-            "tools/list" => HandleToolsList(),
+            "tools/list" => HandleToolsList(parameters),
             "tools/call" => HandleToolsCall(parameters),
             "resources/list" => HandleResourcesList(),
             "resources/read" => HandleResourcesRead(parameters),
@@ -229,17 +238,28 @@ public sealed class McpServer
         };
     }
 
-    private JsonNode HandleToolsList()
+    private JsonNode HandleToolsList(JsonNode? parameters)
     {
+        var ctx = RequestContext.Parse(parameters);
         var arr = new JsonArray();
         foreach (var tool in _tools.Values)
         {
-            arr.Add(new JsonObject
+            if (ToolFilter != null && !ToolFilter(tool, ctx))
+                continue;
+
+            var obj = new JsonObject
             {
                 ["name"] = tool.Name,
                 ["description"] = tool.Description,
                 ["inputSchema"] = JsonNode.Parse(tool.InputSchema.ToJsonString()),
-            });
+            };
+            if (tool.Title != null)
+                obj["title"] = tool.Title;
+            if (tool.OutputSchema != null)
+                obj["outputSchema"] = JsonNode.Parse(tool.OutputSchema.ToJsonString());
+            if (tool.Icons != null)
+                obj["icons"] = JsonNode.Parse(tool.Icons.ToJsonString());
+            arr.Add(obj);
         }
         return new JsonObject { ["resultType"] = "complete", ["tools"] = arr };
     }
@@ -252,6 +272,15 @@ public sealed class McpServer
 
         if (!_tools.TryGetValue(toolName, out var tool))
             throw new InvalidOperationException($"Unknown tool: {toolName}");
+
+        // Enforce the same filter applied to tools/list — a client cannot call
+        // a tool that would not appear in their listing.
+        if (ToolFilter != null)
+        {
+            var ctx = RequestContext.Parse(parameters);
+            if (!ToolFilter(tool, ctx))
+                throw new InvalidOperationException($"Unknown tool: {toolName}");
+        }
 
         const int maxAuthRetries = 2;
 
