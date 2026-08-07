@@ -259,6 +259,154 @@ public class McpServerTests
     }
 
     [Fact]
+    public void ToolsList_IncludesMetadataFields()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "rich",
+            Description = "A rich tool",
+            InputSchema = new JsonObject { ["type"] = "object" },
+            Handler = _ => null,
+            Title = "Rich Tool Display Name",
+            OutputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject { ["count"] = new JsonObject { ["type"] = "integer" } } },
+            Icons = new JsonArray(new JsonObject { ["src"] = "https://example.com/icon.png", ["mimeType"] = "image/png" }),
+        });
+
+        var result = server.Dispatch("tools/list", null)!;
+        var tool = result["tools"]!.AsArray()[0]!;
+
+        Assert.Equal("Rich Tool Display Name", tool["title"]!.GetValue<string>());
+        Assert.Equal("object", tool["outputSchema"]!["type"]!.GetValue<string>());
+        Assert.Equal("https://example.com/icon.png", tool["icons"]![0]!["src"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ToolsList_OmitsNullMetadataFields()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("plain"));
+
+        var result = server.Dispatch("tools/list", null)!;
+        var tool = result["tools"]!.AsArray()[0]!;
+
+        Assert.Null(tool["title"]);
+        Assert.Null(tool["outputSchema"]);
+        Assert.Null(tool["icons"]);
+    }
+
+    [Fact]
+    public void ToolsList_AppliesToolFilter()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("public_tool"));
+        server.RegisterTool(CreateTool("admin_tool"));
+        server.ToolFilter = (tool, ctx) => !tool.Name.StartsWith("admin");
+
+        var result = server.Dispatch("tools/list", null)!;
+        var tools = result["tools"]!.AsArray();
+
+        Assert.Single(tools);
+        Assert.Equal("public_tool", tools[0]!["name"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ToolsList_FilterReceivesRequestContext()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("gated"));
+        RequestContext? captured = null;
+        server.ToolFilter = (tool, ctx) => { captured = ctx; return true; };
+
+        var parameters = new JsonObject
+        {
+            ["_meta"] = new JsonObject
+            {
+                ["io.modelcontextprotocol/protocolVersion"] = "2026-07-28",
+                ["io.modelcontextprotocol/clientInfo"] = new JsonObject { ["name"] = "TestClient", ["version"] = "1.0" },
+                ["io.modelcontextprotocol/clientCapabilities"] = new JsonObject(),
+            },
+        };
+        server.Dispatch("tools/list", parameters);
+
+        Assert.NotNull(captured);
+        Assert.Equal("2026-07-28", captured!.ProtocolVersion);
+        Assert.Equal("TestClient", captured.ClientInfo!["name"]!.GetValue<string>());
+        Assert.NotNull(captured.ClientCapabilities);
+    }
+
+    [Fact]
+    public void ToolsCall_RejectsFilteredOutTool()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("secret"));
+        server.ToolFilter = (tool, ctx) => false;
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            server.Dispatch("tools/call", new JsonObject { ["name"] = "secret" }));
+        Assert.Contains("Unknown tool", ex.Message);
+    }
+
+    [Fact]
+    public void ToolsCall_AllowsToolPassingFilter()
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("allowed"));
+        server.ToolFilter = (tool, ctx) => tool.Name == "allowed";
+
+        var result = server.Dispatch("tools/call", new JsonObject
+        {
+            ["name"] = "allowed",
+            ["arguments"] = new JsonObject { ["input"] = "test" },
+        })!;
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void RequestContext_ParsesMetaFields()
+    {
+        var parameters = new JsonObject
+        {
+            ["_meta"] = new JsonObject
+            {
+                ["io.modelcontextprotocol/protocolVersion"] = "2026-07-28",
+                ["io.modelcontextprotocol/clientInfo"] = new JsonObject { ["name"] = "Agent", ["version"] = "2.0" },
+                ["io.modelcontextprotocol/clientCapabilities"] = new JsonObject { ["elicitation"] = new JsonObject() },
+                ["progressToken"] = "tok-123",
+            },
+        };
+
+        var ctx = RequestContext.Parse(parameters);
+
+        Assert.Equal("2026-07-28", ctx.ProtocolVersion);
+        Assert.Equal("Agent", ctx.ClientInfo!["name"]!.GetValue<string>());
+        Assert.NotNull(ctx.ClientCapabilities);
+        Assert.Equal("tok-123", ctx.ProgressToken);
+        Assert.NotNull(ctx.RawMeta);
+    }
+
+    [Fact]
+    public void RequestContext_ReturnsEmptyWhenNoMeta()
+    {
+        var ctx = RequestContext.Parse(null);
+        Assert.Same(RequestContext.Empty, ctx);
+        Assert.Null(ctx.ProtocolVersion);
+
+        var ctx2 = RequestContext.Parse(new JsonObject { ["name"] = "test" });
+        Assert.Same(RequestContext.Empty, ctx2);
+    }
+
+    [Theory]
+    [InlineData("\"tok-str\"", "tok-str")]
+    [InlineData("42", "42")]
+    public void RequestContext_HandlesStringAndNumericProgressToken(string tokenJson, string expected)
+    {
+        var parameters = JsonNode.Parse($"{{\"_meta\":{{\"progressToken\":{tokenJson}}}}}");
+        var ctx = RequestContext.Parse(parameters);
+        Assert.Equal(expected, ctx.ProgressToken);
+    }
+
+    [Fact]
     public void ToolsCall_InvokesHandler()
     {
         var server = CreateServer();
