@@ -218,6 +218,22 @@ public sealed class McpTransport
             : null;
         McpProgress.SetCurrent(progressSession);
 
+        // For subscriptions/listen, inject the request ID into _meta so the
+        // handler can correlate it with the subscription without parsing the
+        // outer JSON-RPC envelope (which is already consumed at this point).
+        if (method == "subscriptions/listen" && idJson != null)
+        {
+            var paramsObj = parameters?.AsObject() ?? new JsonObject();
+            var meta = paramsObj["_meta"]?.AsObject();
+            if (meta == null)
+            {
+                meta = new JsonObject();
+                paramsObj["_meta"] = meta;
+            }
+            meta["__requestId"] = JsonNode.Parse(idJson);
+            parameters = paramsObj;
+        }
+
         try
         {
             var result = handler(method, parameters);
@@ -228,6 +244,11 @@ public sealed class McpTransport
 
             if (!isNotification)
             {
+                // Deferred responses (e.g., subscriptions/listen) handle their
+                // own response lifecycle — do not send an automatic response.
+                if (result is JsonObject obj && obj.ContainsKey("__deferred"))
+                    return;
+
                 var response = new JsonObject
                 {
                     ["jsonrpc"] = "2.0",
