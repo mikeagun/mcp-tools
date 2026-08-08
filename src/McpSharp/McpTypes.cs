@@ -23,6 +23,18 @@ public sealed class ToolInfo
 
     /// <summary>Icons for display in user interfaces (MCP 2026-07-28). Array of {src, mimeType, sizes?}.</summary>
     public JsonArray? Icons { get; init; }
+
+    /// <summary>
+    /// When true, the handler's return value is used as the MCP tool result
+    /// directly, without content-block wrapping. The handler must return a
+    /// well-formed MCP tool result (a <see cref="JsonObject"/> with a
+    /// <c>content</c> array of content blocks). When false (default), the
+    /// return value is serialized via <c>ToJsonString()</c> and wrapped in
+    /// a <c>{"content":[{"type":"text","text":...}]}</c> block.
+    /// Use this for proxy or forwarding handlers that relay upstream MCP
+    /// tool results without modification.
+    /// </summary>
+    public bool RawResult { get; init; }
 }
 
 /// <summary>
