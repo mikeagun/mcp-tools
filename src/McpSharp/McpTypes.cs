@@ -35,6 +35,14 @@ public sealed class ToolInfo
     /// tool results without modification.
     /// </summary>
     public bool RawResult { get; init; }
+
+    /// <summary>
+    /// Custom renderer for the human-readable content block text. When set,
+    /// the content text is produced by this function instead of JSON serialization.
+    /// When used alongside <see cref="OutputSchema"/>, <c>structuredContent</c>
+    /// carries the raw handler return value while content uses the renderer's output.
+    /// </summary>
+    public Func<JsonNode?, string>? TextRenderer { get; init; }
 }
 
 /// <summary>

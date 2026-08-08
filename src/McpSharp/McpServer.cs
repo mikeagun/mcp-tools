@@ -501,13 +501,33 @@ public sealed class McpServer
                     return cloned;
                 }
 
-                var text = result?.ToJsonString() ?? "null";
+                // structuredContent: when OutputSchema is set and result is a JsonObject,
+                // include both content (text) and structuredContent (machine-readable).
+                if (tool.OutputSchema != null && result is JsonObject structuredObj)
+                {
+                    var text = tool.TextRenderer != null
+                        ? tool.TextRenderer(result)
+                        : result.ToJsonString();
+                    return new JsonObject
+                    {
+                        ["resultType"] = "complete",
+                        ["content"] = new JsonArray
+                        {
+                            new JsonObject { ["type"] = "text", ["text"] = text }
+                        },
+                        ["structuredContent"] = JsonNode.Parse(structuredObj.ToJsonString())
+                    };
+                }
+
+                var defaultText = tool.TextRenderer != null
+                    ? tool.TextRenderer(result)
+                    : result?.ToJsonString() ?? "null";
                 return new JsonObject
                 {
                     ["resultType"] = "complete",
                     ["content"] = new JsonArray
                     {
-                        new JsonObject { ["type"] = "text", ["text"] = text }
+                        new JsonObject { ["type"] = "text", ["text"] = defaultText }
                     }
                 };
             }
