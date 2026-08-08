@@ -268,6 +268,63 @@ public enum ElicitationAction
 }
 
 /// <summary>
+/// Parsed client sampling capability from the <c>initialize</c> handshake.
+/// </summary>
+public sealed class SamplingCapabilities
+{
+    /// <summary>The client advertised the <c>sampling</c> capability.</summary>
+    public bool Supported { get; init; }
+
+    /// <summary>The client supports tool use within sampling requests.</summary>
+    public bool Tools { get; init; }
+
+    /// <summary>The client supports context inclusion (includeContext: "thisServer"/"allServers").</summary>
+    public bool Context { get; init; }
+
+    /// <summary>No sampling capability.</summary>
+    public static readonly SamplingCapabilities None = new();
+
+    /// <summary>
+    /// Parse the client's <c>capabilities.sampling</c> node.
+    /// Absent ⇒ unsupported. Present (even empty) ⇒ basic sampling supported.
+    /// </summary>
+    public static SamplingCapabilities Parse(JsonNode? samplingCap)
+    {
+        if (samplingCap is null)
+            return None;
+
+        var obj = samplingCap as JsonObject;
+        bool hasTools = obj is not null && obj.ContainsKey("tools");
+        bool hasContext = obj is not null && obj.ContainsKey("context");
+        return new SamplingCapabilities { Supported = true, Tools = hasTools, Context = hasContext };
+    }
+}
+
+/// <summary>
+/// Result of a <c>sampling/createMessage</c> request sent from the server to the client.
+/// </summary>
+public sealed class SamplingResult
+{
+    /// <summary>The role of the generated message ("assistant").</summary>
+    public required string Role { get; init; }
+
+    /// <summary>
+    /// The generated content. May be a single content object or an array
+    /// (e.g., for tool_use responses). Stored as the raw JSON node.
+    /// </summary>
+    public required JsonNode Content { get; init; }
+
+    /// <summary>The model that generated the response.</summary>
+    public string? Model { get; init; }
+
+    /// <summary>The reason the model stopped generating ("endTurn", "toolUse", "maxTokens", etc.).</summary>
+    public string? StopReason { get; init; }
+
+    /// <summary>Whether the model stopped because it wants to use tools.</summary>
+    public bool IsToolUse => StopReason == "toolUse";
+}
+
+/// <summary>
 /// Thrown when authentication fails and requires human intervention.
 /// Caught by McpServer to produce a structured error that tells the agent to STOP,
 /// or to prompt the user via elicitation if supported.

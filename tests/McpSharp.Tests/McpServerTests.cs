@@ -1469,4 +1469,373 @@ public class McpServerTests
         var firstLine = raw.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0];
         return JsonNode.Parse(firstLine)!;
     }
+
+    // ── Sampling capability parsing ─────────────────────────────
+
+    [Fact]
+    public void SamplingCapabilities_Parse_Null_ReturnsNone()
+    {
+        var caps = SamplingCapabilities.Parse(null);
+        Assert.False(caps.Supported);
+        Assert.False(caps.Tools);
+    }
+
+    [Fact]
+    public void SamplingCapabilities_Parse_EmptyObject_BasicSupport()
+    {
+        var caps = SamplingCapabilities.Parse(new JsonObject());
+        Assert.True(caps.Supported);
+        Assert.False(caps.Tools);
+    }
+
+    [Fact]
+    public void SamplingCapabilities_Parse_WithTools()
+    {
+        var caps = SamplingCapabilities.Parse(new JsonObject
+        {
+            ["tools"] = new JsonObject(),
+        });
+        Assert.True(caps.Supported);
+        Assert.True(caps.Tools);
+        Assert.False(caps.Context);
+    }
+
+    [Fact]
+    public void SamplingCapabilities_Parse_WithContext()
+    {
+        var caps = SamplingCapabilities.Parse(new JsonObject
+        {
+            ["context"] = new JsonObject(),
+        });
+        Assert.True(caps.Supported);
+        Assert.False(caps.Tools);
+        Assert.True(caps.Context);
+    }
+
+    [Fact]
+    public void Initialize_PopulatesSamplingCaps()
+    {
+        var server = CreateServer();
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject
+            {
+                ["sampling"] = new JsonObject { ["tools"] = new JsonObject() },
+            },
+        });
+        Assert.True(server.SamplingCaps.Supported);
+        Assert.True(server.SamplingCaps.Tools);
+    }
+
+    [Fact]
+    public void Initialize_NoSampling_CapsUnsupported()
+    {
+        var server = CreateServer();
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject(),
+        });
+        Assert.False(server.SamplingCaps.Supported);
+    }
+
+    // ── Sampling ────────────────────────────────────────────────
+
+    [Fact]
+    public void Sample_WithoutTransport_ReturnsNull()
+    {
+        var server = CreateServer();
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["sampling"] = new JsonObject() },
+        });
+
+        Assert.Null(server.Sample(CreateSamplingParams()));
+    }
+
+    [Fact]
+    public void Sample_WithoutSamplingCapability_ReturnsNull()
+    {
+        var (server, _, _) = CreateSamplingServerWithTransport();
+        // Re-initialize without sampling capability
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject(),
+        });
+
+        Assert.Null(server.Sample(CreateSamplingParams()));
+    }
+
+    [Fact]
+    public void Sample_ToolsRequestWithoutToolsCap_ReturnsNull()
+    {
+        var (server, _, _) = CreateSamplingServerWithTransport(withTools: false);
+
+        var paramsWithTools = CreateSamplingParams();
+        paramsWithTools["tools"] = new JsonArray(new JsonObject
+        {
+            ["name"] = "test_tool",
+            ["description"] = "A tool",
+            ["inputSchema"] = new JsonObject { ["type"] = "object" },
+        });
+
+        Assert.Null(server.Sample(paramsWithTools));
+    }
+
+    [Fact]
+    public void Sample_ToolChoiceWithoutToolsCap_ReturnsNull()
+    {
+        var (server, _, _) = CreateSamplingServerWithTransport(withTools: false);
+
+        var paramsWithChoice = CreateSamplingParams();
+        paramsWithChoice["toolChoice"] = new JsonObject { ["mode"] = "auto" };
+
+        Assert.Null(server.Sample(paramsWithChoice));
+    }
+
+    [Fact]
+    public void Sample_IncludeContextWithoutContextCap_StillAllowed()
+    {
+        // includeContext "thisServer"/"allServers" is SHOULD NOT without context cap, not MUST NOT.
+        var (server, input, _) = CreateSamplingServerWithTransport(withTools: false);
+
+        WriteNdjsonToStream(input, new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject
+            {
+                ["role"] = "assistant",
+                ["content"] = new JsonObject { ["type"] = "text", ["text"] = "ok" },
+                ["model"] = "m",
+                ["stopReason"] = "endTurn",
+            },
+        }.ToJsonString());
+
+        var paramsWithContext = CreateSamplingParams();
+        paramsWithContext["includeContext"] = "thisServer";
+
+        var result = server.Sample(paramsWithContext);
+        Assert.NotNull(result);
+    }
+
+    [Fact]
+    public void Sample_IncludeContextNone_AllowedWithoutContextCap()
+    {
+        var (server, input, _) = CreateSamplingServerWithTransport(withTools: false);
+
+        WriteNdjsonToStream(input, new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject
+            {
+                ["role"] = "assistant",
+                ["content"] = new JsonObject { ["type"] = "text", ["text"] = "ok" },
+                ["model"] = "m",
+                ["stopReason"] = "endTurn",
+            },
+        }.ToJsonString());
+
+        var paramsNoneContext = CreateSamplingParams();
+        paramsNoneContext["includeContext"] = "none";
+
+        var result = server.Sample(paramsNoneContext);
+        Assert.NotNull(result);
+    }
+
+    [Fact]
+    public void Sample_MalformedResponse_ReturnsNull()
+    {
+        var (server, input, _) = CreateSamplingServerWithTransport();
+
+        // Response with role as a number instead of string
+        WriteNdjsonToStream(input, new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject
+            {
+                ["role"] = 42,
+                ["content"] = new JsonObject { ["type"] = "text", ["text"] = "ok" },
+            },
+        }.ToJsonString());
+
+        Assert.Null(server.Sample(CreateSamplingParams()));
+    }
+
+    [Fact]
+    public void Sample_BasicTextResponse()
+    {
+        var (server, input, output) = CreateSamplingServerWithTransport();
+
+        WriteNdjsonToStream(input, new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject
+            {
+                ["role"] = "assistant",
+                ["content"] = new JsonObject { ["type"] = "text", ["text"] = "Paris" },
+                ["model"] = "test-model",
+                ["stopReason"] = "endTurn",
+            },
+        }.ToJsonString());
+
+        var result = server.Sample(CreateSamplingParams());
+
+        Assert.NotNull(result);
+        Assert.Equal("assistant", result.Role);
+        Assert.Equal("Paris", result.Content["text"]!.GetValue<string>());
+        Assert.Equal("test-model", result.Model);
+        Assert.Equal("endTurn", result.StopReason);
+        Assert.False(result.IsToolUse);
+
+        // Verify the request was sent correctly
+        var sent = ReadNdjsonFromStream(output);
+        Assert.Equal("sampling/createMessage", sent["method"]!.GetValue<string>());
+        Assert.Equal("s-1", sent["id"]!.GetValue<string>());
+        Assert.NotNull(sent["params"]!["messages"]);
+    }
+
+    [Fact]
+    public void Sample_ToolUseResponse()
+    {
+        var (server, input, _) = CreateSamplingServerWithTransport(withTools: true);
+
+        WriteNdjsonToStream(input, new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["result"] = new JsonObject
+            {
+                ["role"] = "assistant",
+                ["content"] = new JsonArray(new JsonObject
+                {
+                    ["type"] = "tool_use",
+                    ["id"] = "call_123",
+                    ["name"] = "get_weather",
+                    ["input"] = new JsonObject { ["city"] = "Paris" },
+                }),
+                ["model"] = "test-model",
+                ["stopReason"] = "toolUse",
+            },
+        }.ToJsonString());
+
+        var paramsWithTools = CreateSamplingParams();
+        paramsWithTools["tools"] = new JsonArray(new JsonObject
+        {
+            ["name"] = "get_weather",
+            ["description"] = "Get weather",
+            ["inputSchema"] = new JsonObject { ["type"] = "object" },
+        });
+
+        var result = server.Sample(paramsWithTools);
+
+        Assert.NotNull(result);
+        Assert.True(result.IsToolUse);
+        Assert.Equal("toolUse", result.StopReason);
+        // Content is an array with tool_use items
+        Assert.Equal("tool_use", result.Content[0]!["type"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Sample_ErrorResponse_ReturnsNull()
+    {
+        var (server, input, _) = CreateSamplingServerWithTransport();
+
+        WriteNdjsonToStream(input, new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = "s-1",
+            ["error"] = new JsonObject { ["code"] = -32600, ["message"] = "not supported" },
+        }.ToJsonString());
+
+        Assert.Null(server.Sample(CreateSamplingParams()));
+    }
+
+    [Fact]
+    public void Sample_IncrementingIds_ShareCounterWithElicit()
+    {
+        // Sampling and elicitation share the same ID counter.
+        var (server, input, output) = CreateSamplingServerWithTransport();
+        // Also enable elicitation
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject
+            {
+                ["sampling"] = new JsonObject(),
+                ["elicitation"] = new JsonObject(),
+            },
+        });
+
+        // Queue two responses
+        WriteNdjsonToStream(input,
+            new JsonObject { ["jsonrpc"] = "2.0", ["id"] = "s-1",
+                ["result"] = new JsonObject
+                {
+                    ["role"] = "assistant",
+                    ["content"] = new JsonObject { ["type"] = "text", ["text"] = "Hello" },
+                    ["model"] = "m", ["stopReason"] = "endTurn",
+                } }.ToJsonString(),
+            new JsonObject { ["jsonrpc"] = "2.0", ["id"] = "s-2",
+                ["result"] = new JsonObject { ["action"] = "accept",
+                    ["content"] = new JsonObject { ["v"] = 1 } } }.ToJsonString());
+
+        var samplingResult = server.Sample(CreateSamplingParams());
+        var elicitResult = server.Elicit("Test", new JsonObject());
+
+        Assert.NotNull(samplingResult);
+        Assert.NotNull(elicitResult);
+
+        // Verify IDs are sequential
+        output.Position = 0;
+        var raw = System.Text.Encoding.UTF8.GetString(output.ToArray());
+        var lines = raw.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal("s-1", JsonNode.Parse(lines[0])!["id"]!.GetValue<string>());
+        Assert.Equal("s-2", JsonNode.Parse(lines[1])!["id"]!.GetValue<string>());
+    }
+
+    // ── Sampling helpers ────────────────────────────────────────
+
+    private static JsonObject CreateSamplingParams() => new()
+    {
+        ["messages"] = new JsonArray(new JsonObject
+        {
+            ["role"] = "user",
+            ["content"] = new JsonObject { ["type"] = "text", ["text"] = "What is the capital of France?" },
+        }),
+        ["maxTokens"] = 100,
+    };
+
+    private static (McpServer server, MemoryStream input, MemoryStream output) CreateSamplingServerWithTransport(
+        bool withTools = false)
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        var dummy = System.Text.Encoding.UTF8.GetBytes("{\"_\":0}\n");
+        input.Write(dummy);
+        input.Position = 0;
+        transport.ReadMessage();
+
+        input.SetLength(0);
+        input.Position = 0;
+        output.SetLength(0);
+        output.Position = 0;
+
+        var server = new McpServer("test-server");
+        server.Transport = transport;
+
+        var samplingCap = new JsonObject();
+        if (withTools)
+            samplingCap["tools"] = new JsonObject();
+
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["sampling"] = samplingCap },
+        });
+
+        return (server, input, output);
+    }
 }
