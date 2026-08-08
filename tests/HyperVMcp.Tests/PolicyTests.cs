@@ -1250,10 +1250,9 @@ public class SuggestionGenerationTests
     public void CancelCommand_WithResolver_GeneratesSessionAndPermanentPairs()
     {
         var (_, classifier, _, optionGen) = CreatePolicy();
-        classifier.CommandSessionResolver = commandId =>
-            commandId == "cmd-42" ? "s-1" : null;
-        classifier.SessionVmResolver = sessionId =>
-            sessionId == "s-1" ? "test-vm" : null;
+        classifier.CommandContextResolver = commandId =>
+            commandId == "cmd-42" ? new CommandPolicyContext("s-1", "test-vm") : null;
+        classifier.SessionVmResolver = _ => null;
 
         var evaluation = classifier.Evaluate("cancel_command",
             new JsonObject { ["command_id"] = "cmd-42" });
@@ -1269,6 +1268,170 @@ public class SuggestionGenerationTests
         // Destructive deny options.
         Assert.Contains(options, o => o.Label == "Deny cancel_command on test-vm (this session)"
             && o.Polarity == McpSharp.Policy.ApprovalPolarity.Deny);
+    }
+
+    [Theory]
+    [InlineData("get_command_status", "cmd-42")]
+    [InlineData("cancel_command", "cmd-42")]
+    [InlineData("search_command_output", "cmd-42")]
+    [InlineData("get_command_output", "cmd-42")]
+    [InlineData("free_command_output", "cmd-42")]
+    [InlineData("save_command_output", "cmd-42")]
+    [InlineData("cancel_command", "xfer-42")]
+    public void RetainedCommandContext_MatchesVmScopedRulesWithoutLiveSession(
+        string toolName, string commandId)
+    {
+        var config = new HyperVPolicyConfig
+        {
+            UserRules =
+            [
+                new McpSharp.Policy.UserRule
+                {
+                    Rule = HyperVRuleMatcher.BuildVmRule([toolName], "test-vm"),
+                },
+            ],
+        };
+        var classifier = new HyperVToolClassifier(config)
+        {
+            CommandContextResolver = id =>
+                id == commandId ? new CommandPolicyContext("removed-session", "test-vm") : null,
+            SessionVmResolver = _ => null,
+        };
+        var engine = new PolicyEngine(config, classifier, new HyperVRuleMatcher(classifier));
+        var args = new JsonObject { ["command_id"] = commandId };
+        if (toolName == "save_command_output")
+            args["path"] = @"C:\temp\output.txt";
+
+        var evaluation = engine.Evaluate(toolName, args);
+
+        Assert.Equal(McpSharp.Policy.PolicyDecision.Allow, evaluation.Decision);
+        Assert.Equal("Matched user rule", evaluation.Reason);
+    }
+
+    [Fact]
+    public void RetainedCommandContext_PreservesSaveOutputHostPathChecks()
+    {
+        var config = new HyperVPolicyConfig
+        {
+            HostPathRestrictions = new HostPathRestrictions
+            {
+                SaveToAllow = [@"C:\temp\**"],
+            },
+        };
+        var classifier = new HyperVToolClassifier(config)
+        {
+            CommandContextResolver = _ =>
+                new CommandPolicyContext("removed-session", "test-vm"),
+            SessionVmResolver = _ => null,
+        };
+        var engine = new PolicyEngine(config, classifier, new HyperVRuleMatcher(classifier));
+
+        var allowed = engine.Evaluate("save_command_output", new JsonObject
+        {
+            ["command_id"] = "cmd-42",
+            ["path"] = @"C:\temp\output.txt",
+        });
+        var outsideAllowed = engine.Evaluate("save_command_output", new JsonObject
+        {
+            ["command_id"] = "cmd-42",
+            ["path"] = @"C:\Users\secret.txt",
+        });
+
+        Assert.Equal(McpSharp.Policy.PolicyDecision.Allow, allowed.Decision);
+        Assert.Equal(McpSharp.Policy.PolicyDecision.Confirm, outsideAllowed.Decision);
+        Assert.Equal(ConfirmTrigger.HostPath, outsideAllowed.GetTrigger());
+    }
+
+    [Fact]
+    public void RetainedCommandContext_EnforcesVmBlocklistWithoutLiveSession()
+    {
+        var config = new HyperVPolicyConfig { VmBlocklist = ["production-*"] };
+        var classifier = new HyperVToolClassifier(config)
+        {
+            CommandContextResolver = _ =>
+                new CommandPolicyContext("removed-session", "production-db"),
+            SessionVmResolver = _ => null,
+        };
+        var engine = new PolicyEngine(config, classifier, new HyperVRuleMatcher(classifier));
+
+        var evaluation = engine.Evaluate("cancel_command",
+            new JsonObject { ["command_id"] = "cmd-42" });
+
+        Assert.Equal(McpSharp.Policy.PolicyDecision.Deny, evaluation.Decision);
+        Assert.Contains("blocklist", evaluation.Reason);
+    }
+
+    [Fact]
+    public void RetainedCommandContext_EnforcesVmScopedDenialWithoutLiveSession()
+    {
+        var config = new HyperVPolicyConfig
+        {
+            DenyRules =
+            [
+                new McpSharp.Policy.UserRule
+                {
+                    Rule = HyperVRuleMatcher.BuildVmRule(["cancel_command"], "test-vm"),
+                },
+            ],
+        };
+        var classifier = new HyperVToolClassifier(config)
+        {
+            CommandContextResolver = _ =>
+                new CommandPolicyContext("removed-session", "test-vm"),
+            SessionVmResolver = _ => null,
+        };
+        var engine = new PolicyEngine(config, classifier, new HyperVRuleMatcher(classifier));
+
+        var evaluation = engine.Evaluate("cancel_command",
+            new JsonObject { ["command_id"] = "cmd-42" });
+
+        Assert.Equal(McpSharp.Policy.PolicyDecision.Deny, evaluation.Decision);
+        Assert.Equal("Matched deny rule", evaluation.Reason);
+    }
+
+    [Fact]
+    public void RetainedCommandContext_OverridesCallerSuppliedVmAndSession()
+    {
+        var config = new HyperVPolicyConfig { VmBlocklist = ["production-*"] };
+        var classifier = new HyperVToolClassifier(config)
+        {
+            CommandContextResolver = _ =>
+                new CommandPolicyContext("s-1", "production-db"),
+            SessionVmResolver = sessionId =>
+                sessionId == "spoofed-session" ? "test-vm" : null,
+        };
+        var engine = new PolicyEngine(config, classifier, new HyperVRuleMatcher(classifier));
+
+        var evaluation = engine.Evaluate("cancel_command", new JsonObject
+        {
+            ["command_id"] = "cmd-42",
+            ["vm_name"] = "test-vm",
+            ["session_id"] = "spoofed-session",
+        });
+
+        Assert.Equal(McpSharp.Policy.PolicyDecision.Deny, evaluation.Decision);
+        Assert.Contains("production-db", evaluation.Reason);
+    }
+
+    [Fact]
+    public void ExtraCommandId_DoesNotOverrideUnrelatedToolContext()
+    {
+        var config = new HyperVPolicyConfig { VmBlocklist = ["production-*"] };
+        var classifier = new HyperVToolClassifier(config)
+        {
+            CommandContextResolver = _ =>
+                new CommandPolicyContext("s-1", "test-vm"),
+        };
+        var engine = new PolicyEngine(config, classifier, new HyperVRuleMatcher(classifier));
+
+        var evaluation = engine.Evaluate("stop_vm", new JsonObject
+        {
+            ["vm_name"] = "production-db",
+            ["command_id"] = "cmd-from-test-vm",
+        });
+
+        Assert.Equal(McpSharp.Policy.PolicyDecision.Deny, evaluation.Decision);
+        Assert.Contains("production-db", evaluation.Reason);
     }
 
     [Fact]
@@ -1399,6 +1562,53 @@ public class PolicyPersistenceTests
     }
 
     [Fact]
+    public void PersistedCancelRule_MatchesRetainedCommandContextAfterReload()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"policy-test-{Guid.NewGuid()}.json");
+        try
+        {
+            var original = new HyperVPolicyConfig();
+            File.WriteAllText(tempFile,
+                JsonSerializer.Serialize(original, HyperVPolicyConfig.HyperVJsonOptions));
+            var classifier = new HyperVToolClassifier(original)
+            {
+                CommandContextResolver = _ =>
+                    new CommandPolicyContext("removed-session", "test-vm"),
+                SessionVmResolver = _ => null,
+            };
+            var matcher = new HyperVRuleMatcher(classifier);
+            var engine = new PolicyEngine(original, classifier, matcher, tempFile);
+            var args = new JsonObject { ["command_id"] = "cmd-42" };
+            var options = new HyperVOptionGenerator(classifier).Generate(
+                "cancel_command", args, classifier.Evaluate("cancel_command", args));
+            var permanent = Assert.Single(options, option =>
+                option.Label == "Allow cancel_command on test-vm (permanently)");
+
+            engine.SaveRuleToPolicy(permanent.Rule!, permanent.Label);
+
+            var reloaded = JsonSerializer.Deserialize<HyperVPolicyConfig>(
+                File.ReadAllText(tempFile), HyperVPolicyConfig.HyperVJsonOptions)!;
+            var reloadedClassifier = new HyperVToolClassifier(reloaded)
+            {
+                CommandContextResolver = _ =>
+                    new CommandPolicyContext("removed-session", "test-vm"),
+                SessionVmResolver = _ => null,
+            };
+            var reloadedEngine = new PolicyEngine(
+                reloaded, reloadedClassifier, new HyperVRuleMatcher(reloadedClassifier));
+
+            var evaluation = reloadedEngine.Evaluate("cancel_command", args);
+
+            Assert.Equal(McpSharp.Policy.PolicyDecision.Allow, evaluation.Decision);
+            Assert.Equal("Matched user rule", evaluation.Reason);
+        }
+        finally
+        {
+            if (File.Exists(tempFile)) File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
     public void Load_DefaultsToStandard()
     {
         var config = new HyperVPolicyConfig();
@@ -1435,6 +1645,74 @@ public class PolicyPersistenceTests
         var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
         using var doc = JsonDocument.Parse(bytes);
         return doc.RootElement.Clone();
+    }
+}
+
+public class ContextPreValidationTests
+{
+    [Theory]
+    [InlineData("get_command_status")]
+    [InlineData("cancel_command")]
+    [InlineData("search_command_output")]
+    [InlineData("get_command_output")]
+    [InlineData("free_command_output")]
+    [InlineData("save_command_output")]
+    public void UnknownCommandId_ReturnsErrorBeforePolicy(string toolName)
+    {
+        var classifier = new HyperVToolClassifier(new HyperVPolicyConfig());
+
+        var result = HyperVMcp.Program.PreValidateContext(
+            toolName,
+            new JsonObject { ["command_id"] = "cmd-missing" },
+            classifier,
+            _ => null);
+
+        Assert.NotNull(result);
+        Assert.True(result!["isError"]!.GetValue<bool>());
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        var error = JsonNode.Parse(text)!;
+        Assert.Equal(CommandRunner.JobNotFoundMessage("cmd-missing"),
+            error["reason"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void RetainedCommandId_PassesWithoutLiveOrCallerSuppliedSession()
+    {
+        var classifier = new HyperVToolClassifier(new HyperVPolicyConfig())
+        {
+            SessionVmResolver = _ => null,
+        };
+        var job = new CommandJob("cmd-42", "removed-session", "test-vm", "test");
+
+        var result = HyperVMcp.Program.PreValidateContext(
+            "cancel_command",
+            new JsonObject
+            {
+                ["command_id"] = "cmd-42",
+                ["session_id"] = "missing-session",
+            },
+            classifier,
+            id => id == job.CommandId ? job : null);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void ExtraCommandId_OnUnrelatedToolIsNotPrevalidated()
+    {
+        var classifier = new HyperVToolClassifier(new HyperVPolicyConfig());
+
+        var result = HyperVMcp.Program.PreValidateContext(
+            "stop_vm",
+            new JsonObject
+            {
+                ["vm_name"] = "test-vm",
+                ["command_id"] = "cmd-missing",
+            },
+            classifier,
+            _ => null);
+
+        Assert.Null(result);
     }
 }
 
@@ -1767,6 +2045,32 @@ public class ElicitationDispatchTests
         var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
         var parsed = JsonNode.Parse(text)!;
         Assert.Equal(true, parsed["stopped"]?.GetValue<bool>());
+    }
+
+    [Fact]
+    public void Elicitation_UnknownCommandId_IsRejectedBeforePrompt()
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var (server, policy, optionGen) = CreateElicitationSetup(input, output);
+        var classifier = new HyperVToolClassifier(new HyperVPolicyConfig());
+
+        var result = McpSharp.Policy.PolicyDispatch.Dispatch("tools/call",
+            new JsonObject
+            {
+                ["name"] = "cancel_command",
+                ["arguments"] = new JsonObject { ["command_id"] = "cmd-missing" },
+            },
+            server, policy, optionGen,
+            preValidator: (toolName, args) => HyperVMcp.Program.PreValidateContext(
+                toolName, args, classifier, _ => null));
+
+        Assert.True(result!["isError"]!.GetValue<bool>());
+        Assert.Equal(0, output.Length);
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        var error = JsonNode.Parse(text)!;
+        Assert.Equal(CommandRunner.JobNotFoundMessage("cmd-missing"),
+            error["reason"]!.GetValue<string>());
     }
 
     [Fact]

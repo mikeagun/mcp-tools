@@ -8,8 +8,7 @@ using McpSharp;
 namespace HyperVMcp.Tools;
 
 /// <summary>
-/// MCP tools for executing commands on VMs: invoke_command, get_command_status,
-/// cancel_command, run_script.
+/// MCP tools for executing VM commands and managing retained command or transfer jobs.
 /// </summary>
 public static class CommandTools
 {
@@ -87,8 +86,8 @@ public static class CommandTools
         server.RegisterTool(new ToolInfo
         {
             Name = "get_command_status",
-            Description = "Poll a running or recently completed command. " +
-                "Set timeout > 0 to wait until the command completes or the timeout elapses " +
+            Description = "Poll a running or recently completed command or transfer job. " +
+                "Set timeout > 0 to wait until the job completes or the timeout elapses " +
                 "(output keeps accumulating during the wait; progress is reported as it streams). " +
                 "Choose a smaller timeout for finer polling, a larger one to block longer. " +
                 "Use since_line to get only new output since last poll (returns last tail_lines of new output). " +
@@ -101,12 +100,12 @@ public static class CommandTools
                     ["command_id"] = new JsonObject
                     {
                         ["type"] = "string",
-                        ["description"] = "Command ID to poll.",
+                        ["description"] = "Command or transfer job ID to poll.",
                     },
                     ["timeout"] = new JsonObject
                     {
                         ["type"] = "integer",
-                        ["description"] = "Seconds to wait until the command completes or the timeout elapses (default: 0 = instant snapshot). Returns early on completion. The agent controls polling frequency via this value.",
+                        ["description"] = "Seconds to wait until the job completes or the timeout elapses (default: 0 = instant snapshot). Returns early on completion. The agent controls polling frequency via this value.",
                     },
                     ["tail_lines"] = new JsonObject
                     {
@@ -135,7 +134,7 @@ public static class CommandTools
                 var includeOutput = args["include_output"]?.GetValue<bool>() ?? true;
 
                 var job = commandRunner.GetCommand(commandId)
-                    ?? throw new InvalidOperationException($"Command '{commandId}' not found. It may have expired — use invoke_command to start a new one.");
+                    ?? throw new InvalidOperationException(CommandRunner.JobNotFoundMessage(commandId));
 
                 if (timeout > 0 && job.Status == CommandStatus.Running)
                 {
@@ -150,7 +149,7 @@ public static class CommandTools
         server.RegisterTool(new ToolInfo
         {
             Name = "cancel_command",
-            Description = "Cancel a running command.",
+            Description = "Cancel a running command or transfer job.",
             InputSchema = new JsonObject
             {
                 ["type"] = "object",
@@ -159,7 +158,7 @@ public static class CommandTools
                     ["command_id"] = new JsonObject
                     {
                         ["type"] = "string",
-                        ["description"] = "Command ID to cancel.",
+                        ["description"] = "Command or transfer job ID to cancel.",
                     },
                 },
                 ["required"] = new JsonArray("command_id"),
@@ -313,13 +312,13 @@ public static class CommandTools
         server.RegisterTool(new ToolInfo
         {
             Name = "search_command_output",
-            Description = "Regex search over a command's retained output. Returns matches with context lines and pagination.",
+            Description = "Regex search over a command or transfer job's retained output. Returns matches with context lines and pagination.",
             InputSchema = new JsonObject
             {
                 ["type"] = "object",
                 ["properties"] = new JsonObject
                 {
-                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command whose output to search." },
+                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command or transfer job whose output to search." },
                     ["pattern"] = new JsonObject { ["type"] = "string", ["description"] = "Regex pattern." },
                     ["context_lines"] = new JsonObject { ["type"] = "integer", ["description"] = "Lines of context around each match (default: 3)." },
                     ["max_results"] = new JsonObject { ["type"] = "integer", ["description"] = "Max matches to return (default: 20)." },
@@ -336,7 +335,7 @@ public static class CommandTools
                 var skip = args["skip"]?.GetValue<int>() ?? 0;
 
                 var job = commandRunner.GetCommand(commandId)
-                    ?? throw new InvalidOperationException($"Command '{commandId}' not found. It may have expired — use invoke_command to start a new one.");
+                    ?? throw new InvalidOperationException(CommandRunner.JobNotFoundMessage(commandId));
 
                 var result = job.Output.Search(pattern, contextLines, maxResults, skip);
 
@@ -365,7 +364,7 @@ public static class CommandTools
                 };
 
                 if (result.Freed)
-                    json["warning"] = "Output has been freed. Re-run the command to capture new output.";
+                    json["warning"] = "Output has been freed. Rerun the originating operation to capture new output.";
                 else if (result.FirstAvailableLine > 1)
                     json["warning"] = $"Output was truncated. Only lines {result.FirstAvailableLine}-{result.FirstAvailableLine + result.RetainedLines - 1} are searchable. Use retention='full' to capture complete output.";
 
@@ -376,13 +375,13 @@ public static class CommandTools
         server.RegisterTool(new ToolInfo
         {
             Name = "get_command_output",
-            Description = "View a range of lines from a command's output. Supports tail, line range, centering on a line number, or centering on a regex match.",
+            Description = "View a range of lines from a command or transfer job's output. Supports tail, line range, centering on a line number, or centering on a regex match.",
             InputSchema = new JsonObject
             {
                 ["type"] = "object",
                 ["properties"] = new JsonObject
                 {
-                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command whose output to view." },
+                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command or transfer job whose output to view." },
                     ["from_line"] = new JsonObject { ["type"] = "integer", ["description"] = "Start line (1-indexed). Omit for tail." },
                     ["to_line"] = new JsonObject { ["type"] = "integer", ["description"] = "End line (inclusive)." },
                     ["max_lines"] = new JsonObject { ["type"] = "integer", ["description"] = "Max lines to return (default: 200)." },
@@ -401,7 +400,7 @@ public static class CommandTools
                 var aroundLine = args["around_line"]?.GetValue<int>();
 
                 var job = commandRunner.GetCommand(commandId)
-                    ?? throw new InvalidOperationException($"Command '{commandId}' not found. It may have expired — use invoke_command to start a new one.");
+                    ?? throw new InvalidOperationException(CommandRunner.JobNotFoundMessage(commandId));
 
                 OutputSlice slice;
                 int? matchLine = null;
@@ -440,7 +439,7 @@ public static class CommandTools
                 if (matchLine.HasValue)
                     json["match_line"] = matchLine.Value;
                 if (slice.Freed)
-                    json["error"] = "Output has been freed. Re-run the command to capture new output.";
+                    json["error"] = "Output has been freed. Rerun the originating operation to capture new output.";
 
                 return json;
             },
@@ -449,13 +448,13 @@ public static class CommandTools
         server.RegisterTool(new ToolInfo
         {
             Name = "save_command_output",
-            Description = "Write a command's retained output to a file on the host.",
+            Description = "Write a command or transfer job's retained output to a file on the host.",
             InputSchema = new JsonObject
             {
                 ["type"] = "object",
                 ["properties"] = new JsonObject
                 {
-                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command whose output to save." },
+                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command or transfer job whose output to save." },
                     ["path"] = new JsonObject { ["type"] = "string", ["description"] = "Local file path to write to." },
                 },
                 ["required"] = new JsonArray("command_id", "path"),
@@ -466,7 +465,7 @@ public static class CommandTools
                 var path = args["path"]!.GetValue<string>();
 
                 var job = commandRunner.GetCommand(commandId)
-                    ?? throw new InvalidOperationException($"Command '{commandId}' not found. It may have expired — use invoke_command to start a new one.");
+                    ?? throw new InvalidOperationException(CommandRunner.JobNotFoundMessage(commandId));
 
                 var (linesWritten, bytesWritten) = job.Output.SaveTo(path);
 
@@ -483,13 +482,13 @@ public static class CommandTools
         server.RegisterTool(new ToolInfo
         {
             Name = "free_command_output",
-            Description = "Release a command's output buffer to free memory. After freeing, search/view tools will report the output as unavailable.",
+            Description = "Release a command or transfer job's output buffer to free memory. After freeing, search/view tools will report the output as unavailable.",
             InputSchema = new JsonObject
             {
                 ["type"] = "object",
                 ["properties"] = new JsonObject
                 {
-                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command whose output to free." },
+                    ["command_id"] = new JsonObject { ["type"] = "string", ["description"] = "Command or transfer job whose output to free." },
                 },
                 ["required"] = new JsonArray("command_id"),
             },

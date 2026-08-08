@@ -90,8 +90,7 @@ public static class Program
             try { return sessionManager.GetSession(sessionId).VmName; }
             catch { return null; }
         };
-        classifier.CommandSessionResolver = commandId =>
-            commandRunner.GetCommand(commandId)?.SessionId;
+        classifier.CommandContextResolver = commandRunner.GetPolicyContext;
         var matcher = new HyperVRuleMatcher(classifier);
         var optionGenerator = new HyperVOptionGenerator(classifier);
         var policy = new PolicyEngine(hvConfig, classifier, matcher, resolvedPolicyPath,
@@ -127,7 +126,8 @@ public static class Program
                 }
 
                 return PolicyDispatch.Dispatch(method, parameters, server, policy, optionGenerator,
-                    preValidator: (toolName, args) => PreValidateSession(toolName, args, classifier),
+                    preValidator: (toolName, args) => PreValidateContext(
+                        toolName, args, classifier, commandRunner.GetCommand),
                     argsSummaryBuilder: (toolName, args) => PolicyDispatch.BuildArgsSummary(args,
                         ["vm_name", "command", "session_id", "command_id", "checkpoint_name",
                          "name", "action", "source", "destination", "path",
@@ -147,22 +147,48 @@ public static class Program
 
     // -- Helpers ----------------------------------------------------------
 
-    static JsonNode? PreValidateSession(string toolName, JsonObject args, HyperVToolClassifier classifier)
+    internal static JsonNode? PreValidateContext(
+        string toolName,
+        JsonObject args,
+        HyperVToolClassifier classifier,
+        Func<string, CommandJob?> commandResolver)
     {
-        // connect_vm creates a new session — session_id is an optional custom ID, not a reference.
-        if (toolName == "connect_vm") return null;
-
-        var sessionId = args["session_id"]?.GetValue<string>();
-        if (sessionId != null && classifier.SessionVmResolver != null
-            && classifier.SessionVmResolver(sessionId) == null)
+        if (HyperVToolClassifier.UsesCommandContext(toolName))
         {
-            return PolicyDispatch.ErrorContent(new JsonObject
+            var commandId = args["command_id"]?.GetValue<string>();
+            if (commandId != null)
             {
-                ["status"] = "error",
-                ["tool"] = toolName,
-                ["reason"] = $"Session '{sessionId}' not found. Use connect_vm to create a session first.",
-            });
+                if (commandResolver(commandId) == null)
+                {
+                    return PolicyDispatch.ErrorContent(new JsonObject
+                    {
+                        ["status"] = "error",
+                        ["tool"] = toolName,
+                        ["reason"] = CommandRunner.JobNotFoundMessage(commandId),
+                    });
+                }
+
+                // Retained job context is authoritative; ignore caller-supplied session fields.
+                return null;
+            }
         }
+
+        // connect_vm creates a new session — session_id is an optional custom ID, not a reference.
+        if (toolName != "connect_vm")
+        {
+            var sessionId = args["session_id"]?.GetValue<string>();
+            if (sessionId != null && classifier.SessionVmResolver != null
+                && classifier.SessionVmResolver(sessionId) == null)
+            {
+                return PolicyDispatch.ErrorContent(new JsonObject
+                {
+                    ["status"] = "error",
+                    ["tool"] = toolName,
+                    ["reason"] = $"Session '{sessionId}' not found. Use connect_vm to create a session first.",
+                });
+            }
+        }
+
         return null;
     }
 
