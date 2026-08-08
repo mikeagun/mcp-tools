@@ -608,6 +608,136 @@ public class McpServerTests
     }
 
     [Fact]
+    public void ToolsCall_WithOutputSchema_IncludesStructuredContent()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "structured",
+            Description = "Returns structured data",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            OutputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject { ["count"] = new JsonObject { ["type"] = "integer" } } },
+            Handler = _ => new JsonObject { ["count"] = 42 },
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "structured" })!;
+
+        // content block contains JSON text
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Contains("42", text);
+        // structuredContent contains the raw object
+        var sc = result["structuredContent"]!;
+        Assert.Equal(42, sc["count"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void ToolsCall_WithOutputSchema_AndTextRenderer_UsesRenderer()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "rendered",
+            Description = "Uses text renderer",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            OutputSchema = new JsonObject { ["type"] = "object" },
+            TextRenderer = node => $"Count is {node!["count"]!.GetValue<int>()}",
+            Handler = _ => new JsonObject { ["count"] = 7 },
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "rendered" })!;
+
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("Count is 7", text);
+        Assert.Equal(7, result["structuredContent"]!["count"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void ToolsCall_WithOutputSchema_NullResult_NoStructuredContent()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "null_out",
+            Description = "Returns null",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            OutputSchema = new JsonObject { ["type"] = "object" },
+            Handler = _ => null,
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "null_out" })!;
+
+        // No structuredContent when result is null
+        Assert.Null(result["structuredContent"]);
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("null", text);
+    }
+
+    [Fact]
+    public void ToolsCall_WithOutputSchema_NonJsonObject_NoStructuredContent()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "array_out",
+            Description = "Returns an array",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            OutputSchema = new JsonObject { ["type"] = "object" },
+            Handler = _ => new JsonArray(JsonValue.Create(1), JsonValue.Create(2)),
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "array_out" })!;
+
+        Assert.Null(result["structuredContent"]);
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Contains("[1,2]", text);
+    }
+
+    [Fact]
+    public void ToolsCall_RawResult_IgnoresOutputSchema()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "raw_with_schema",
+            Description = "RawResult takes precedence",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            OutputSchema = new JsonObject { ["type"] = "object" },
+            RawResult = true,
+            Handler = _ => new JsonObject
+            {
+                ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = "raw" } }
+            },
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "raw_with_schema" })!;
+
+        // RawResult wins — no structuredContent auto-added
+        Assert.Null(result["structuredContent"]);
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("raw", text);
+    }
+
+    [Fact]
+    public void ToolsCall_TextRenderer_WithoutOutputSchema_OnlyAffectsContent()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "renderer_only",
+            Description = "TextRenderer without OutputSchema",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            TextRenderer = node => "custom text",
+            Handler = _ => new JsonObject { ["data"] = "ignored" },
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "renderer_only" })!;
+
+        Assert.Null(result["structuredContent"]);
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("custom text", text);
+    }
+
+    [Fact]
     public void ToolsCall_HandlerThrows_ReturnsError()
     {
         var server = CreateServer();
