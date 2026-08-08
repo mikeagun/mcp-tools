@@ -41,6 +41,13 @@ public sealed class McpServer
     /// </summary>
     public ElicitationCapabilities ElicitationCaps { get; private set; } = ElicitationCapabilities.None;
 
+    /// <summary>
+    /// Parsed client sampling capabilities, populated after the initialize handshake.
+    /// Used to gate <see cref="Sample"/> calls — the server must not send
+    /// sampling requests to clients that did not advertise the capability.
+    /// </summary>
+    public SamplingCapabilities SamplingCaps { get; private set; } = SamplingCapabilities.None;
+
     public McpServer(string name, string? version = null)
     {
         _name = name;
@@ -260,6 +267,127 @@ public sealed class McpServer
         return new ElicitationResult { Action = action, Content = content };
     }
 
+    // ── Sampling ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Send a <c>sampling/createMessage</c> request to the client, asking it to
+    /// generate an LLM completion. Blocks until the client responds or the timeout
+    /// expires. Returns null if transport is not set or the client does not support
+    /// sampling.
+    /// </summary>
+    /// <param name="samplingParams">
+    /// The full params object for <c>sampling/createMessage</c>. Must include at
+    /// least <c>messages</c> (array) and <c>maxTokens</c> (integer). May include
+    /// <c>modelPreferences</c>, <c>systemPrompt</c>, <c>temperature</c>,
+    /// <c>tools</c>, <c>toolChoice</c>, and <c>includeContext</c>.
+    /// </param>
+    /// <param name="timeoutSeconds">Timeout in seconds. 0 = no timeout.</param>
+    public SamplingResult? Sample(JsonObject samplingParams, int timeoutSeconds = 0)
+    {
+        if (Transport == null || !SamplingCaps.Supported)
+            return null;
+
+        // If the request includes tools or toolChoice, verify the client advertised tool support.
+        if ((samplingParams.ContainsKey("tools") || samplingParams.ContainsKey("toolChoice"))
+            && !SamplingCaps.Tools)
+            return null;
+
+        var id = $"s-{Interlocked.Increment(ref _nextServerRequestId)}";
+
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id,
+            ["method"] = "sampling/createMessage",
+            ["params"] = JsonNode.Parse(samplingParams.ToJsonString()),
+        };
+
+        var tcs = new TaskCompletionSource<JsonNode>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Transport.RegisterResponseWaiter(id, tcs);
+
+        Transport.WriteMessage(request);
+        Transport.StartReader();
+
+        try
+        {
+            if (timeoutSeconds > 0)
+            {
+                if (!tcs.Task.Wait(TimeSpan.FromSeconds(timeoutSeconds)))
+                {
+                    Transport.UnregisterResponseWaiter(id);
+                    CancelSampling(id);
+                    return null;
+                }
+            }
+            else
+            {
+                tcs.Task.Wait();
+            }
+        }
+        catch (AggregateException ex) when (ex.InnerException is TaskCanceledException)
+        {
+            return null;
+        }
+
+        return ParseSamplingResult(tcs.Task.Result);
+    }
+
+    private void CancelSampling(string requestId)
+    {
+        Transport!.WriteMessage(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["method"] = "notifications/cancelled",
+            ["params"] = new JsonObject
+            {
+                ["requestId"] = requestId,
+                ["reason"] = "Timeout waiting for sampling response",
+            },
+        });
+    }
+
+    private static SamplingResult? ParseSamplingResult(JsonNode msg)
+    {
+        try
+        {
+            if (msg["error"] != null)
+                return null;
+
+            var result = msg["result"] as JsonObject;
+            if (result == null)
+                return null;
+
+            // role must be a string
+            if (result["role"] is not JsonValue roleVal || !roleVal.TryGetValue<string>(out var role))
+                return null;
+
+            var content = result["content"];
+            if (content == null)
+                return null;
+
+            // model and stopReason are optional strings — read defensively
+            string? model = null;
+            if (result["model"] is JsonValue modelVal && modelVal.TryGetValue<string>(out var m))
+                model = m;
+
+            string? stopReason = null;
+            if (result["stopReason"] is JsonValue stopVal && stopVal.TryGetValue<string>(out var s))
+                stopReason = s;
+
+            return new SamplingResult
+            {
+                Role = role,
+                Content = JsonNode.Parse(content.ToJsonString())!,
+                Model = model,
+                StopReason = stopReason,
+            };
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
     // ── Discover ─────────────────────────────────────────────────
 
     private JsonNode HandleDiscover()
@@ -293,6 +421,7 @@ public sealed class McpServer
         var clientCaps = parameters?["capabilities"];
         ElicitationCaps = ElicitationCapabilities.Parse(clientCaps?["elicitation"]);
         ClientSupportsElicitation = ElicitationCaps.Supported;
+        SamplingCaps = SamplingCapabilities.Parse(clientCaps?["sampling"]);
 
         return new JsonObject
         {
