@@ -79,6 +79,26 @@ server.RegisterTool(new ToolInfo
 
 McpServer catches handler exceptions and returns them as MCP error responses with `isError: true`.
 
+### Raw Result Pass-Through
+By default, handler return values are serialized via `ToJsonString()` and wrapped in a `{"content":[{"type":"text","text":...}]}` block. For proxy or forwarding handlers that relay upstream MCP tool results, set `RawResult = true` on the `ToolInfo` to pass the handler's return value through directly without re-wrapping:
+
+```csharp
+server.RegisterTool(new ToolInfo
+{
+    Name = "forwarded_tool",
+    Description = "Forwards to upstream",
+    InputSchema = upstreamSchema,
+    RawResult = true,   // Handler returns pre-formed MCP tool result
+    Handler = args =>
+    {
+        // Returns { "content": [{ "type": "text", "text": "..." }] }
+        return upstreamClient.CallTool("forwarded_tool", args);
+    },
+});
+```
+
+When `RawResult = true`, the handler must return a `JsonObject` with a well-formed `content` array. If the handler returns `null` or a non-`JsonObject`, it falls back to the default wrapping behavior.
+
 ### Framing Auto-Detection
 The transport auto-detects Content-Length vs NDJSON framing from the first non-whitespace byte. `{` → NDJSON, anything else → Content-Length headers. This is locked for the session after first detection.
 

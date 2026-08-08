@@ -453,6 +453,161 @@ public class McpServerTests
     }
 
     [Fact]
+    public void ToolsCall_RawResult_PassesThroughContentDirectly()
+    {
+        var server = CreateServer();
+        var upstreamResult = new JsonObject
+        {
+            ["content"] = new JsonArray
+            {
+                new JsonObject { ["type"] = "text", ["text"] = "raw output from upstream" }
+            }
+        };
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "proxy_tool",
+            Description = "Forwarding tool",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ => JsonNode.Parse(upstreamResult.ToJsonString())!.AsObject(),
+            RawResult = true,
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "proxy_tool" })!;
+
+        // Content should be the upstream content directly, not double-wrapped.
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("raw output from upstream", text);
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ToolsCall_RawResult_PreservesIsErrorFlag()
+    {
+        var server = CreateServer();
+        var errorResult = new JsonObject
+        {
+            ["content"] = new JsonArray
+            {
+                new JsonObject { ["type"] = "text", ["text"] = "something went wrong" }
+            },
+            ["isError"] = true,
+        };
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "proxy_error",
+            Description = "Forwarding tool that returns error",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ => JsonNode.Parse(errorResult.ToJsonString())!.AsObject(),
+            RawResult = true,
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "proxy_error" })!;
+
+        Assert.True(result["isError"]!.GetValue<bool>());
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("something went wrong", text);
+    }
+
+    [Fact]
+    public void ToolsCall_RawResult_PreservesMultipleContentBlocks()
+    {
+        var server = CreateServer();
+        var multiContent = new JsonObject
+        {
+            ["content"] = new JsonArray
+            {
+                new JsonObject { ["type"] = "text", ["text"] = "first block" },
+                new JsonObject { ["type"] = "text", ["text"] = "second block" },
+            }
+        };
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "proxy_multi",
+            Description = "Forwarding tool with multiple content blocks",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ => JsonNode.Parse(multiContent.ToJsonString())!.AsObject(),
+            RawResult = true,
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "proxy_multi" })!;
+
+        var content = result["content"]!.AsArray();
+        Assert.Equal(2, content.Count);
+        Assert.Equal("first block", content[0]!["text"]!.GetValue<string>());
+        Assert.Equal("second block", content[1]!["text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ToolsCall_RawResult_FalseByDefault_WrapsResult()
+    {
+        // Verify that the default (RawResult = false) behavior is unchanged.
+        var server = CreateServer();
+        var contentResult = new JsonObject
+        {
+            ["content"] = new JsonArray
+            {
+                new JsonObject { ["type"] = "text", ["text"] = "should be wrapped" }
+            }
+        };
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "normal_tool",
+            Description = "Normal tool returning content-like object",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ => JsonNode.Parse(contentResult.ToJsonString())!.AsObject(),
+            // RawResult defaults to false — should wrap the result.
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "normal_tool" })!;
+
+        // The entire handler result should be serialized into a text content block.
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        var parsed = JsonNode.Parse(text)!;
+        // The inner "content" is part of the serialized JSON, not a top-level MCP content block.
+        Assert.NotNull(parsed["content"]);
+    }
+
+    [Fact]
+    public void ToolsCall_RawResult_HandlerReturnsNull_FallsBackToWrapping()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "proxy_null",
+            Description = "Forwarding tool returning null",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ => null,
+            RawResult = true,
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "proxy_null" })!;
+
+        // Null result falls back to normal wrapping even with RawResult = true.
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("null", text);
+    }
+
+    [Fact]
+    public void ToolsCall_RawResult_HandlerReturnsNonObject_FallsBackToWrapping()
+    {
+        var server = CreateServer();
+        server.RegisterTool(new ToolInfo
+        {
+            Name = "proxy_string",
+            Description = "Forwarding tool returning a string value",
+            InputSchema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject() },
+            Handler = _ => JsonValue.Create("plain string"),
+            RawResult = true,
+        });
+
+        var result = server.Dispatch("tools/call", new JsonObject { ["name"] = "proxy_string" })!;
+
+        // Non-JsonObject falls back to normal wrapping even with RawResult = true.
+        var text = result["content"]!.AsArray()[0]!["text"]!.GetValue<string>();
+        Assert.Equal("\"plain string\"", text);
+    }
+
+    [Fact]
     public void ToolsCall_HandlerThrows_ReturnsError()
     {
         var server = CreateServer();

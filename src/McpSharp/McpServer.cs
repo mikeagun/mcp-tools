@@ -492,6 +492,15 @@ public sealed class McpServer
             try
             {
                 var result = tool.Handler(arguments);
+
+                // RawResult: handler returned a pre-formed MCP tool result — pass through.
+                if (tool.RawResult && result is JsonObject rawObj)
+                {
+                    var cloned = JsonNode.Parse(rawObj.ToJsonString())!.AsObject();
+                    cloned["resultType"] = "complete";
+                    return cloned;
+                }
+
                 var text = result?.ToJsonString() ?? "null";
                 return new JsonObject
                 {
