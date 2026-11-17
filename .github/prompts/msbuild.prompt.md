@@ -9,7 +9,7 @@ tools: ["msbuild"]
 - `run_in_terminal`: Execute MSBuild commands and capture build output
 - `get_errors`: Retrieve compilation errors and warnings from VS Code
 - `read_file`: Examine source files and build configuration
-- `msbuild` MCP tools: `list_projects`, `build`, `get_build_status`, `cancel_build`, `find_project_for_file`, `get_dependency_graph`
+- `msbuild` MCP tools: `list_projects`, `build`, `get_build_status`, `cancel_build`, `find_project_for_file`, `get_dependency_graph`, `list_vs_installations`
 
 ## Instructions
 

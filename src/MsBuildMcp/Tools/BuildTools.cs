@@ -51,6 +51,7 @@ public static class BuildTools
                         ["type"] = "string",
                         ["description"] = "Additional MSBuild arguments (e.g. '/p:Analysis=True')",
                     },
+                    ["vs"] = VsTools.VsArgSchema("this build (MSBuild.exe and the vcvarsall environment)"),
                     ["retention"] = new JsonObject
                     {
                         ["type"] = "string",
@@ -100,9 +101,10 @@ public static class BuildTools
                 var errorsFrom = args["errors_from"]?.GetValue<int>() ?? 0;
                 var warningsFrom = args["warnings_from"]?.GetValue<int>() ?? 0;
                 var maxErrors = args["max_errors"]?.GetValue<int>() ?? 50;
+                var vs = VsTools.GetVsArg(args);
 
                 var status = buildManager.StartOrPoll(slnPath, targets, config, platform,
-                    restore, additionalArgs, timeout, retention: retention);
+                    restore, additionalArgs, timeout, retention: retention, vs: vs);
                 return StatusToJson(status, errorsFrom, warningsFrom, maxErrors);
             },
         });
@@ -633,15 +635,31 @@ public static class BuildTools
 
         if (s.Collision != null)
         {
-            obj["collision"] = new JsonObject
+            var c = s.Collision;
+            var vsDiffers = c.RunningVisualStudio != null && c.RequestedVisualStudio != null &&
+                !string.Equals(c.RunningVisualStudio.InstallationPath, c.RequestedVisualStudio.InstallationPath,
+                    StringComparison.OrdinalIgnoreCase);
+            var message = vsDiffers
+                ? $"A build is already running with a different Visual Studio installation. " +
+                  $"Running: {c.RunningTargets ?? "(full solution)"} with {c.RunningVisualStudio!.Describe()}. " +
+                  $"Requested: {c.RequestedTargets ?? "(full solution)"} with {c.RequestedVisualStudio!.Describe()}. "
+                : $"A build is already running for different targets. " +
+                  $"Running: {c.RunningTargets ?? "(full solution)"} " +
+                  $"Requested: {c.RequestedTargets ?? "(full solution)"}. ";
+            message += "Use cancel_build to stop it, or get_build_status to poll it.";
+
+            var collision = new JsonObject
             {
-                ["message"] = $"A build is already running for different targets. " +
-                              $"Running: {s.Collision.RunningTargets ?? "(full solution)"} " +
-                              $"Requested: {s.Collision.RequestedTargets ?? "(full solution)"}. " +
-                              $"Use cancel_build to stop it, or get_build_status to poll it.",
-                ["running_targets"] = s.Collision.RunningTargets,
-                ["requested_targets"] = s.Collision.RequestedTargets,
+                ["message"] = message,
+                ["running_targets"] = c.RunningTargets,
+                ["requested_targets"] = c.RequestedTargets,
             };
+            if (vsDiffers)
+            {
+                collision["running_visual_studio"] = c.RunningVisualStudio!.ToJson();
+                collision["requested_visual_studio"] = c.RequestedVisualStudio!.ToJson();
+            }
+            obj["collision"] = collision;
         }
 
         return obj;

@@ -19,5 +19,6 @@ public static class ToolRegistration
         DependencyTools.Register(server, solutionEngine, projectEngine);
         BuildTools.Register(server, buildManager);
         QueryTools.Register(server, solutionEngine, projectEngine);
+        VsTools.Register(server, buildManager.VisualStudio);
     }
 }

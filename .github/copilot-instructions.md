@@ -376,7 +376,8 @@ src/MsBuildMcp/
 │   ├── ProjectTools.cs     # get_project_details, find_project_for_file, get_project_items, get_project_imports
 │   ├── DependencyTools.cs  # get_dependency_graph
 │   ├── BuildTools.cs       # build, get_build_status, cancel_build, parse_build_output, search/get/save_build_output
-│   └── QueryTools.cs       # find_packages, find_property, diff_configurations
+│   ├── QueryTools.cs       # find_packages, find_property, diff_configurations
+│   └── VsTools.cs          # list_vs_installations + shared `vs` argument schema/parsing
 ├── Prompts/
 │   └── PromptRegistration.cs  # 5 MCP prompt templates
 └── Resources/
@@ -394,6 +395,8 @@ This split exists because VS MSBuild's SDK resolver DLLs target .NET Framework a
 
 ### Visual Studio Selection
 Both sides of the dual strategy use the same `vswhere`-discovered installation, chosen by `VsToolchainProvider` from `--vs <selector>` > `MSBUILD_MCP_VS` > `latest`. `VsSelector` accepts `latest`, a product year (`2022`), a version prefix (`17.14`), a version range (`[17,18)`), or an installation path; selections must match an installation reported by `vswhere`. VS 2026 reports `productLineVersion` `18` (not the year), so years are inferred from the major version. `VCTargetsPath` is the highest `MSBuild\Microsoft\VC\vNNN` directory containing `Microsoft.Cpp.Default.props` — newer VS versions ship incomplete stub directories for older versions.
+
+`build` and the evaluation tools also take a per-call `vs` selector (`VsTools.VsArgSchema()` / `GetVsArg()`). Builds capture one toolchain per installation and report a `collision` when the running build uses a different installation. Evaluation applies the selected `VCTargetsPath` as a **toolset property** (`ProjectEngine.SetToolsetProperty`), never a global property: the VC targets temporarily reassign `VCTargetsPath` (`Microsoft.Cpp.ToolsetLocation.props`) to locate toolsets from other VS versions, and global properties can't be reassigned. Tools that evaluate many projects and swallow per-project errors must call `ProjectEngine.ValidateVs()` first so a bad selector is reported once.
 
 ### Evaluation over Parsing
 Never regex-parse `.vcxproj` XML directly. Always use `Microsoft.Build.Evaluation.Project` for correct handling of property inheritance, conditional evaluation, import chains, and NuGet targets.
@@ -444,7 +447,7 @@ Exceptions thrown by tool handlers are caught by McpServer and returned as MCP e
 - **SolutionDir**: MSBuild normally sets this from the `.sln` context. Standalone `.vcxproj` evaluation requires setting it as a global property. `ProjectEngine.InferSolutionDir()` walks parent dirs to find a `.sln`.
 - **ItemDefinitionGroup**: ClCompile/Link/Lib/Midl metadata is only extracted for C++ projects (projects with `ClCompile` items). WiX and C# projects skip this to avoid spurious inherited settings.
 - **Central Package Management (CPM)**: When `PackageReference` has no Version, check `PackageVersion` items from `Directory.Packages.props`. See `ExtractPackageReferences()`.
-- **Build collision**: Only one build runs at a time. If a build is already running, the `build` tool polls it instead of starting a new one, and reports a `collision` if targets differ.
+- **Build collision**: Only one build runs at a time. If a build is already running, the `build` tool polls it instead of starting a new one, and reports a `collision` if targets or the Visual Studio installation differ.
 
 ---
 

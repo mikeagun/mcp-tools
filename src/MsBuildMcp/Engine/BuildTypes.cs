@@ -31,7 +31,7 @@ public sealed record BuildStatus
 
 /// <summary>
 /// Included in BuildStatus when the agent requested a build for different targets
-/// than what's currently running.
+/// (or a different Visual Studio installation) than what's currently running.
 /// </summary>
 public sealed class BuildCollision
 {
@@ -39,4 +39,6 @@ public sealed class BuildCollision
     public string? RequestedTargets { get; init; }
     public required string RunningSolution { get; init; }
     public string? RunningTargets { get; init; }
+    public VsInstance? RequestedVisualStudio { get; init; }
+    public VsInstance? RunningVisualStudio { get; init; }
 }

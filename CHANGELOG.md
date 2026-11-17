@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Lazy multi-source authentication (env vars, GCM, CLI)
   - Agent-first API with progressive disclosure and failure classification
 
-- **MsBuildMcp** — MSBuild project exploration server (17 tools, 5 prompts):
+- **MsBuildMcp** — MSBuild project exploration server (18 tools, 5 prompts):
   - Project exploration: `list_projects`, `get_project_details`, `get_project_items`, `get_project_imports`, `find_project_for_file`
   - Dependency analysis: `get_dependency_graph`
   - Build execution: `build`, `publish`, `get_build_status`, `cancel_build`, `parse_build_output`, `search_build_output`, `get_build_output`, `save_build_output`
@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prompts: `diagnose-build-failure`, `what-to-build`, `impact-analysis`, `resolve-nuget-issue`, `explain-build-config`
   - Dual MSBuild strategy (dotnet SDK evaluation + VS MSBuild builds)
   - Visual Studio version selection for side-by-side installs (e.g. VS 2022 + VS 2026): `--vs <selector>` / `MSBUILD_MCP_VS` accept `latest`, a product year (`2022`), a version prefix (`17.14`), a version range (`[17,18)`), or an installation path; C++ evaluation and builds use the same selected installation, and build status reports it as `visual_studio`
+  - Per-call Visual Studio selection: optional `vs` argument on `build` and the project-evaluation tools (and the `what-to-build` / `explain-build-config` prompts), plus `list_vs_installations`; a running build with a different installation is reported as a collision
   - `publish` uses `dotnet` CLI directly (not VS MSBuild) for .NET SDK projects
   - Policy-based guardrails with MCP elicitation
 

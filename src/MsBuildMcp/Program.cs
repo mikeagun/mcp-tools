@@ -23,7 +23,7 @@ public static class Program
         ProjectEngine.EnsureMsBuildRegistered(vs);
 
         var solutionEngine = new SolutionEngine();
-        var projectEngine = new ProjectEngine();
+        var projectEngine = new ProjectEngine(vs);
         var buildManager = new BuildManager(vs);
         var server = new McpServer("msbuild-mcp");
 

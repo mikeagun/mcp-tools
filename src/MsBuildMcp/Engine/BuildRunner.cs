@@ -357,10 +357,14 @@ public sealed class BuildManager : IDisposable
         _vs = vs;
     }
 
+    /// <summary>Visual Studio selection used for builds (server default + per-call selectors).</summary>
+    public VsToolchainProvider VisualStudio => _vs;
+
     /// <summary>
     /// Start a new build or return the current running build's status.
     /// Waits up to timeoutSeconds for the build to complete or for new errors.
     /// </summary>
+    /// <param name="vs">Visual Studio selector for this build; null uses the server default.</param>
     public BuildStatus StartOrPoll(
         string solutionPath,
         string? targets,
@@ -370,9 +374,13 @@ public sealed class BuildManager : IDisposable
         string? additionalArgs,
         int timeoutSeconds,
         int? projectsTotal = null,
-        string retention = "full")
+        string retention = "full",
+        string? vs = null)
     {
-        var toolchain = _vs.GetToolchain();
+        var instance = _vs.ResolveInstance(vs);
+        // Capture the toolchain (vcvarsall takes seconds on first use per installation) outside
+        // the lock, but skip it when this call will most likely just poll a running build.
+        var toolchain = HasRunningBuild ? null : _vs.GetToolchain(instance);
         var normalizedSln = Path.GetFullPath(solutionPath);
 
         BuildJob newJob;
@@ -383,6 +391,9 @@ public sealed class BuildManager : IDisposable
                 var sameTargets = string.Equals(_currentBuild.Targets, targets,
                     StringComparison.OrdinalIgnoreCase);
                 var sameSln = string.Equals(_currentBuild.SolutionPath, normalizedSln,
+                    StringComparison.OrdinalIgnoreCase);
+                var sameVs = _currentBuild.VisualStudio != null && string.Equals(
+                    _currentBuild.VisualStudio.InstallationPath, instance.InstallationPath,
                     StringComparison.OrdinalIgnoreCase);
 
                 // Release lock during wait
@@ -401,8 +412,8 @@ public sealed class BuildManager : IDisposable
                 var status = _currentBuild!.GetStatus();
                 status.ProjectsTotal = projectsTotal;
 
-                // If the running build is for different targets, tell the agent
-                if (!sameTargets || !sameSln)
+                // If the running build is for different targets or VS, tell the agent
+                if (!sameTargets || !sameSln || !sameVs)
                 {
                     status.Collision = new BuildCollision
                     {
@@ -410,6 +421,8 @@ public sealed class BuildManager : IDisposable
                         RequestedTargets = targets,
                         RunningSolution = _currentBuild.SolutionPath,
                         RunningTargets = _currentBuild.Targets,
+                        RequestedVisualStudio = instance,
+                        RunningVisualStudio = _currentBuild.VisualStudio,
                     };
                 }
 
@@ -428,6 +441,9 @@ public sealed class BuildManager : IDisposable
             // and BuildArgs/CreateProcessStartInfo are pure static helpers — so
             // holding the lock here is safe and inexpensive relative to the
             // build's own runtime.
+            // The toolchain is normally captured before taking the lock; this only runs when a
+            // build was running at entry but finished before we got here.
+            toolchain ??= _vs.GetToolchain(instance);
             var args = BuildArgs(solutionPath, targets, configuration, platform, restore, additionalArgs);
             var psi = CreateProcessStartInfo(toolchain, solutionPath, args, ProjectEngine.InjectedVcTargetsPath);
             var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";

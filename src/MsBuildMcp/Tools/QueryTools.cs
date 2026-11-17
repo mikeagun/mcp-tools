@@ -40,6 +40,7 @@ public static class QueryTools
                     },
                     ["configuration"] = new JsonObject { ["type"] = "string", ["default"] = "Debug" },
                     ["platform"] = new JsonObject { ["type"] = "string", ["default"] = "x64" },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath)"),
                 },
                 ["required"] = new JsonArray("sln_path"),
             },
@@ -49,6 +50,8 @@ public static class QueryTools
                 var filter = args["package_name"]?.GetValue<string>();
                 var config = args["configuration"]?.GetValue<string>() ?? "Debug";
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
+                var vs = VsTools.GetVsArg(args);
+                projEngine.ValidateVs(vs);
 
                 var solution = slnEngine.Parse(slnPath);
                 var solutionDir = solution.Directory + Path.DirectorySeparatorChar;
@@ -61,7 +64,7 @@ public static class QueryTools
                     var fullPath = Path.GetFullPath(Path.Combine(solution.Directory, proj.RelativePath));
                     try
                     {
-                        var snapshot = projEngine.Evaluate(fullPath, config, platform, solutionDir);
+                        var snapshot = projEngine.Evaluate(fullPath, config, platform, solutionDir, vs: vs);
                         evaluated++;
                         foreach (var pkg in snapshot.PackageReferences)
                         {
@@ -189,6 +192,7 @@ public static class QueryTools
                     },
                     ["configuration"] = new JsonObject { ["type"] = "string", ["default"] = "Debug" },
                     ["platform"] = new JsonObject { ["type"] = "string", ["default"] = "x64" },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath)"),
                 },
                 ["required"] = new JsonArray("sln_path"),
             },
@@ -199,6 +203,8 @@ public static class QueryTools
                 var propFilter = args["property_filter"]?.GetValue<string>();
                 var config = args["configuration"]?.GetValue<string>() ?? "Debug";
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
+                var vs = VsTools.GetVsArg(args);
+                projEngine.ValidateVs(vs);
                 bool isRegex = propFilter != null;
                 var maxResults = args["max_results"]?.GetValue<int>() ?? (isRegex ? 100 : int.MaxValue);
                 var includeDetails = args["include_details"]?.GetValue<bool>() ?? !isRegex;
@@ -221,7 +227,7 @@ public static class QueryTools
                     var fullPath = Path.GetFullPath(Path.Combine(solution.Directory, proj.RelativePath));
                     try
                     {
-                        var snapshot = projEngine.Evaluate(fullPath, config, platform, solutionDir);
+                        var snapshot = projEngine.Evaluate(fullPath, config, platform, solutionDir, vs: vs);
                         evaluated++;
 
                         if (propName != null)
@@ -324,6 +330,7 @@ public static class QueryTools
                         ["type"] = "string",
                         ["description"] = "Path to .sln file (for SolutionDir resolution). Auto-inferred if omitted.",
                     },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath) of both configurations"),
                 },
                 ["required"] = new JsonArray("project_path", "config_a", "config_b"),
             },
@@ -336,9 +343,10 @@ public static class QueryTools
                 var platformB = args["platform_b"]?.GetValue<string>() ?? "x64";
                 var slnPath = args["sln_path"]?.GetValue<string>();
                 var solutionDir = slnPath != null ? Path.GetDirectoryName(Path.GetFullPath(slnPath)) + Path.DirectorySeparatorChar : null;
+                var vs = VsTools.GetVsArg(args);
 
-                var snapA = projEngine.Evaluate(path, configA, platformA, solutionDir);
-                var snapB = projEngine.Evaluate(path, configB, platformB, solutionDir);
+                var snapA = projEngine.Evaluate(path, configA, platformA, solutionDir, vs: vs);
+                var snapB = projEngine.Evaluate(path, configB, platformB, solutionDir, vs: vs);
 
                 var diffs = new JsonArray();
 

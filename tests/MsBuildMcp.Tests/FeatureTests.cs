@@ -115,8 +115,43 @@ public class FeatureTests : IDisposable
             "find_project_for_file", "find_property", "get_build_output",
             "get_build_status", "get_dependency_graph", "get_project_details",
             "get_project_imports", "get_project_items", "list_projects",
-            "parse_build_output", "publish", "save_build_output", "search_build_output",
+            "list_vs_installations", "parse_build_output", "publish", "save_build_output",
+            "search_build_output",
         }, names);
+    }
+
+    [Theory]
+    [InlineData("build")]
+    [InlineData("get_project_details")]
+    [InlineData("get_project_items")]
+    [InlineData("get_project_imports")]
+    [InlineData("find_project_for_file")]
+    [InlineData("get_dependency_graph")]
+    [InlineData("find_property")]
+    [InlineData("find_packages")]
+    [InlineData("diff_configurations")]
+    public void EvaluatingAndBuildTools_AcceptVsSelector(string tool)
+    {
+        var result = _server.Dispatch("tools/list", null);
+        var schema = result!["tools"]!.AsArray().Single(t => t!["name"]!.GetValue<string>() == tool)!["inputSchema"]!;
+        Assert.Equal("string", schema["properties"]!["vs"]?["type"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void FindProjectForFile_InvalidVs_ReportsSingleError()
+    {
+        var result = _server.Dispatch("tools/call", new JsonObject
+        {
+            ["name"] = "find_project_for_file",
+            ["arguments"] = new JsonObject
+            {
+                ["sln_path"] = _testSlnPath,
+                ["file_path"] = "x.cs",
+                ["vs"] = "not-a-selector",
+            },
+        });
+        Assert.True(result!["isError"]!.GetValue<bool>());
+        Assert.Contains("Invalid Visual Studio selector", result["content"]![0]!["text"]!.GetValue<string>());
     }
 
     // --- list_projects ---

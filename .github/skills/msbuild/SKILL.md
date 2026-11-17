@@ -25,7 +25,7 @@ targeted builds, dependency analysis, and error parsing.
 - `msbuild` MCP tools: `list_projects`, `build`, `get_build_status`, `cancel_build`,
   `find_project_for_file`, `get_dependency_graph`, `get_project_details`,
   `get_project_items`, `get_project_imports`, `find_property`, `find_packages`,
-  `diff_configurations`, `parse_build_output`
+  `diff_configurations`, `parse_build_output`, `list_vs_installations`
 - `run_in_terminal`: Execute MSBuild commands and capture build output
 - `get_errors`: Retrieve compilation errors and warnings from VS Code
 - `read_file`: Examine source files and build configuration
@@ -171,6 +171,24 @@ Use `Debug|x64` unless the user specifies otherwise. Run `list_projects` to see 
 available configurations for the solution — they vary by project (e.g., some solutions
 have `Release`, `NativeOnlyDebug`, or custom configurations).
 
+## Visual Studio Version Selection
+
+When several Visual Studio versions are installed side by side, the server uses its
+configured default (newest by default). If a project needs a specific version — e.g. its
+`PlatformToolset` is only installed in one of them (`MSB8020: The build tools for v143
+cannot be found`) — pass `vs` to `build` and to the evaluation tools for that project:
+
+```
+Call: list_vs_installations()                        # See installations and the default
+Call: build(sln_path="...", targets="...", vs="2022")
+Call: get_project_details(project_path="...", vs="2022")
+```
+
+`vs` accepts a product year (`2022`, `2026`), a version prefix (`17.14`), a version range
+(`[17,18)`), or an installation path from `list_vs_installations`. The `visual_studio` field of
+the build response shows which installation ran the build. Use the same `vs` consistently
+for a solution; requesting a different `vs` while a build is running reports a collision.
+
 ## Advanced: Build Analysis with MCP Tools
 
 Beyond building, the MCP server provides project intelligence:
@@ -192,6 +210,7 @@ or "what depends on EbpfApi?" without manual `.vcxproj` spelunking.
 | "MSB4057: target does not exist" | Wrong target syntax — check `list_projects` for correct path |
 | "MSB4019: imported project not found" | Missing NuGet restore — set `restore=true` |
 | Build collision (different targets) | Cancel current build first, or wait for it to finish |
+| "MSB8020: The build tools for vNNN cannot be found" | Toolset is installed in a different VS version — check `list_vs_installations` and pass `vs` |
 | Very slow build | Use targeted builds instead of full solution |
 | "LINK : error LNK..." | Linker error — check `get_project_details` for AdditionalDependencies |
 
