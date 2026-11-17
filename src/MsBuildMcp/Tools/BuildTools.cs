@@ -607,6 +607,7 @@ public static class BuildTools
         };
 
         if (s.ExitCode.HasValue) obj["exit_code"] = s.ExitCode.Value;
+        if (s.VisualStudio != null) obj["visual_studio"] = s.VisualStudio.ToJson();
 
         // Progress info (only meaningful while running)
         if (s.ProjectsCompleted > 0 || s.ProjectsStarted > 0)

@@ -366,6 +366,8 @@ src/MsBuildMcp/
 │   ├── DependencyGraph.cs  # Project reference DAG, topological sort (Kahn's algorithm)
 │   ├── BuildRunner.cs      # BuildJob (streaming parser) + BuildManager (lifecycle)
 │   ├── BuildTypes.cs       # BuildStatus, BuildCollision data types
+│   ├── VsLocator.cs        # vswhere discovery (VsInstance) + selector parsing/resolution (VsSelector)
+│   ├── VsToolchain.cs      # VsToolchainProvider — default selector + per-installation vcvarsall capture
 │   ├── OutputBuffer.cs     # Build output retention, search, range queries, and export
 │   └── ErrorParser.cs      # MSBuild output → structured BuildDiagnostic objects
 ├── Tools/
@@ -386,9 +388,12 @@ src/MsBuildMcp/
 ### MSBuild Registration Strategy
 The server uses a **dual MSBuild strategy**:
 - **In-process evaluation**: Uses `MSBuildLocator.RegisterDefaults()` (dotnet SDK MSBuild) which has working .NET 9 SDK resolvers. VCTargetsPath from Visual Studio is set as an env var for C++ project support.
-- **Build subprocess**: Uses VS `MSBuild.exe` directly (discovered via `vswhere` + `vcvarsall` for the full C++ build environment).
+- **Build subprocess**: Uses VS `MSBuild.exe` directly (with `vcvarsall` for the full C++ build environment).
 
-This split exists because VS MSBuild's SDK resolver DLLs target .NET Framework and can't load in a .NET 9 host. See `ProjectEngine.EnsureMsBuildRegistered()` and `BuildManager.DiscoverVsToolchain()`.
+This split exists because VS MSBuild's SDK resolver DLLs target .NET Framework and can't load in a .NET 9 host. See `ProjectEngine.EnsureMsBuildRegistered()` and `VsToolchainProvider.CaptureToolchain()`.
+
+### Visual Studio Selection
+Both sides of the dual strategy use the same `vswhere`-discovered installation, chosen by `VsToolchainProvider` from `--vs <selector>` > `MSBUILD_MCP_VS` > `latest`. `VsSelector` accepts `latest`, a product year (`2022`), a version prefix (`17.14`), a version range (`[17,18)`), or an installation path; selections must match an installation reported by `vswhere`. VS 2026 reports `productLineVersion` `18` (not the year), so years are inferred from the major version. `VCTargetsPath` is the highest `MSBuild\Microsoft\VC\vNNN` directory containing `Microsoft.Cpp.Default.props` — newer VS versions ship incomplete stub directories for older versions.
 
 ### Evaluation over Parsing
 Never regex-parse `.vcxproj` XML directly. Always use `Microsoft.Build.Evaluation.Project` for correct handling of property inheritance, conditional evaluation, import chains, and NuGet targets.
@@ -397,7 +402,7 @@ Never regex-parse `.vcxproj` XML directly. Always use `Microsoft.Build.Evaluatio
 Each MCP tool call is stateless (no session between calls), but the engine layer caches evaluated projects keyed by `(path, config, platform, mtime)`. See `ProjectEngine._cache`.
 
 ### Environment Variable Poisoning
-The build subprocess must strip `MSBUILD_EXE_PATH`, `MSBuildSDKsPath`, `MSBuildExtensionsPath`, and `DOTNET_HOST_PATH` from its environment. These are injected by the dotnet host and would poison VS MSBuild's NuGet SDK resolver. See `BuildManager.CreateProcessStartInfo()`.
+The build subprocess must strip `MSBUILD_EXE_PATH`, `MSBuildSDKsPath`, `MSBuildExtensionsPath`, and `DOTNET_HOST_PATH` from its environment. These are injected by the dotnet host and would poison VS MSBuild's NuGet SDK resolver. It also drops the `VCTargetsPath` that `ProjectEngine` injected for evaluation so VS `MSBuild.exe` resolves its own C++ targets (a user-set `VCTargetsPath` is kept). See `BuildManager.CreateProcessStartInfo()`.
 
 ## How to Add a New Tool
 

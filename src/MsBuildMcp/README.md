@@ -16,7 +16,7 @@ Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw
 ### Prerequisites
 
 - [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with C++ workload (for C++ project evaluation and building)
+- [Visual Studio 2022 or later](https://visualstudio.microsoft.com/) (or Build Tools) with C++ workload (for C++ project evaluation and building)
 
 ### Install
 
@@ -54,6 +54,31 @@ dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp
   }
 }
 ```
+
+### Selecting a Visual Studio Version
+
+When several Visual Studio installations are side by side (e.g. VS 2022 and VS 2026), the server uses the newest stable one by default. To pin a different one, pass `--vs <selector>` or set `MSBUILD_MCP_VS` (the CLI argument wins):
+
+```json
+{
+  "mcpServers": {
+    "msbuild": {
+      "command": "C:\\path\\to\\publish\\msbuild-mcp\\msbuild-mcp.exe",
+      "args": ["--vs", "2022"]
+    }
+  }
+}
+```
+
+| Selector | Example | Matches |
+|----------|---------|---------|
+| `latest` (default) | `latest` | Newest installation |
+| Product year | `2022`, `2026` | Installations of that product line |
+| Version prefix | `17`, `17.14` | Installations whose version starts with those components |
+| Version range | `[17,18)`, `[18.0,)` | Installations within the range (`[`/`]` inclusive, `(`/`)` exclusive) |
+| Installation path | `C:\Program Files\Microsoft Visual Studio\2022\Enterprise` | That installation |
+
+Installations are discovered with `vswhere` (Visual Studio and Build Tools with the MSBuild component). When several match, stable installations are preferred over prerelease, then the newest version. The selector must match an installation reported by `vswhere`; otherwise the error lists the available installations. The selected installation provides both `VCTargetsPath` for C++ evaluation and `MSBuild.exe` + the `vcvarsall` environment for builds, and build status reports it as `visual_studio`. A `VCTargetsPath` already set in the server's environment is left as-is for evaluation.
 
 ## Tools
 
@@ -291,6 +316,8 @@ src/MsBuildMcp/
 │   ├── ProjectEngine.cs    # Microsoft.Build evaluation with caching
 │   ├── DependencyGraph.cs  # DAG with topological sort
 │   ├── BuildRunner.cs      # Async MSBuild/dotnet process management
+│   ├── VsLocator.cs        # vswhere discovery + Visual Studio selector resolution
+│   ├── VsToolchain.cs      # Per-installation MSBuild.exe + vcvarsall environment cache
 │   └── ErrorParser.cs      # MSBuild output → structured diagnostics
 ├── Policy/
 │   ├── MsBuildPolicyConfig.cs    # Build constraints (require_targets, etc.)
@@ -308,7 +335,7 @@ Tests are located at `tests/MsBuildMcp.Tests/`.
 
 **Evaluation over parsing**: Never regex-parse `.vcxproj` XML. Uses `Microsoft.Build.Evaluation.Project` which correctly handles property inheritance, conditional evaluation, import chains, and NuGet targets.
 
-**Dual MSBuild strategy**: The in-process evaluation API uses the .NET SDK's MSBuild (with working SDK resolvers for .NET 9) plus Visual Studio's `VCTargetsPath` (for C++ project support). The build subprocess uses Visual Studio's `MSBuild.exe` directly via `vswhere` discovery.
+**Dual MSBuild strategy**: The in-process evaluation API uses the .NET SDK's MSBuild (with working SDK resolvers for .NET 9) plus Visual Studio's `VCTargetsPath` (for C++ project support). The build subprocess uses Visual Studio's `MSBuild.exe` directly. Both come from the same `vswhere`-discovered installation, selected by `--vs` / `MSBUILD_MCP_VS` (see [Selecting a Visual Studio Version](#selecting-a-visual-studio-version)).
 
 **Async build model**: Builds run in a background process with streaming output parsing. The `build` tool returns early on new errors (so agents can cancel and fix without waiting), and streams live progress (lines parsed + projects completed) to clients that pass a `progressToken`. Output is retained in `full` mode by default (up to 50 MB in memory with lazy spill-to-disk); a lightweight `tail` mode keeps only the last 1000 lines.
 

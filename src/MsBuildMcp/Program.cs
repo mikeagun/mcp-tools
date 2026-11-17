@@ -16,12 +16,15 @@ public static class Program
 {
     public static void Main(string[] cmdArgs)
     {
+        // Visual Studio selection: --vs <selector> > MSBUILD_MCP_VS > latest.
+        var vs = VsToolchainProvider.FromEnvironment(GetArg(cmdArgs, "--vs"));
+
         // MSBuild Locator must be called before any Microsoft.Build types are loaded.
-        ProjectEngine.EnsureMsBuildRegistered();
+        ProjectEngine.EnsureMsBuildRegistered(vs);
 
         var solutionEngine = new SolutionEngine();
         var projectEngine = new ProjectEngine();
-        var buildManager = new BuildManager();
+        var buildManager = new BuildManager(vs);
         var server = new McpServer("msbuild-mcp");
 
         // Register tools, resources, prompts
@@ -30,7 +33,7 @@ public static class Program
         PromptRegistration.RegisterAll(server, solutionEngine, projectEngine);
 
         // Load guardrail policy.
-        var policyPath = GetPolicyArg(cmdArgs);
+        var policyPath = GetArg(cmdArgs, "--policy");
         var classifier = new MsBuildToolClassifier();
         var matcher = new MsBuildRuleMatcher();
         var optionGenerator = new MsBuildOptionGenerator();
@@ -120,11 +123,11 @@ public static class Program
         return null;
     }
 
-    private static string? GetPolicyArg(string[] args)
+    internal static string? GetArg(string[] args, string name)
     {
         for (var i = 0; i < args.Length - 1; i++)
         {
-            if (args[i] == "--policy")
+            if (args[i] == name)
                 return args[i + 1];
         }
         return null;

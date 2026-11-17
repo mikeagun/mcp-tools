@@ -15,7 +15,7 @@ A collection of MCP (Model Context Protocol) servers and libraries for AI-assist
 ## Prerequisites
 
 - [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with C++ workload (for MsBuildMcp)
+- [Visual Studio 2022 or later](https://visualstudio.microsoft.com/) with C++ workload (for MsBuildMcp)
 - Hyper-V enabled (for HyperVMcp, Windows only)
 
 ## Building

@@ -44,7 +44,7 @@ dotnet run --project src/MsBuildMcp       # Run a specific server
 ### ⚠️ Be Careful With
 - **McpSharp changes** affect all four servers — run the full test suite
 - `ProjectEngine.EnsureMsBuildRegistered()` — MSBuild registration is sensitive
-- `BuildManager.DiscoverVsToolchain()` — VS discovery and vcvarsall environment capture
+- `VsLocator` / `VsToolchainProvider.CaptureToolchain()` — VS discovery, selection, and vcvarsall environment capture
 - `ElevatedBackend.cs` — Frontend/backend protocol for Hyper-V privilege escalation
 - `McpTransport` framing auto-detection — must handle both Content-Length and NDJSON
 - Thread safety in `BuildManager` and `CommandRunner`

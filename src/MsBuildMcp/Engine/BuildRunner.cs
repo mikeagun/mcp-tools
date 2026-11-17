@@ -39,6 +39,9 @@ public sealed class BuildJob : IDisposable
     public DateTime StartTime { get; } = DateTime.UtcNow;
     public OutputBuffer Output { get; }
 
+    /// <summary>VS installation used for this build (null for dotnet publish).</summary>
+    public VsInstance? VisualStudio { get; }
+
     private readonly Process _process;
     private readonly Task _readerTask;
     private readonly object _lock = new();
@@ -59,12 +62,14 @@ public sealed class BuildJob : IDisposable
     private readonly ManualResetEventSlim _newsEvent = new(false);
 
     public BuildJob(ProcessStartInfo psi, string buildId, string command,
-        string solutionPath, string? targets, string retention = "full")
+        string solutionPath, string? targets, string retention = "full",
+        VsInstance? visualStudio = null)
     {
         BuildId = buildId;
         Command = command;
         SolutionPath = solutionPath;
         Targets = targets;
+        VisualStudio = visualStudio;
         Output = new OutputBuffer(retention, buildId);
         _process = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start MSBuild");
@@ -238,6 +243,7 @@ public sealed class BuildJob : IDisposable
                 Warnings = _warnings.ToList(),
                 Command = Command,
                 IsCompleted = _completed,
+                VisualStudio = VisualStudio,
             };
 
             if (includeOutput)
@@ -326,7 +332,7 @@ public sealed class BuildJob : IDisposable
 /// </summary>
 public sealed class BuildManager : IDisposable
 {
-    private static readonly Lazy<VsToolchain> _toolchain = new(DiscoverVsToolchain);
+    private readonly VsToolchainProvider _vs;
 
     private BuildJob? _currentBuild;
     private readonly Queue<BuildStatus> _recentBuilds = new(); // last 5 completed
@@ -341,6 +347,14 @@ public sealed class BuildManager : IDisposable
     internal int BuildCounter
     {
         get { lock (_lock) return _buildCounter; }
+    }
+
+    /// <summary>Uses the shared vswhere locator with <c>MSBUILD_MCP_VS</c> as the default selector.</summary>
+    public BuildManager() : this(VsToolchainProvider.FromEnvironment()) { }
+
+    public BuildManager(VsToolchainProvider vs)
+    {
+        _vs = vs;
     }
 
     /// <summary>
@@ -358,7 +372,7 @@ public sealed class BuildManager : IDisposable
         int? projectsTotal = null,
         string retention = "full")
     {
-        var toolchain = _toolchain.Value;
+        var toolchain = _vs.GetToolchain();
         var normalizedSln = Path.GetFullPath(solutionPath);
 
         BuildJob newJob;
@@ -415,11 +429,12 @@ public sealed class BuildManager : IDisposable
             // holding the lock here is safe and inexpensive relative to the
             // build's own runtime.
             var args = BuildArgs(solutionPath, targets, configuration, platform, restore, additionalArgs);
-            var psi = CreateProcessStartInfo(toolchain, solutionPath, args);
+            var psi = CreateProcessStartInfo(toolchain, solutionPath, args, ProjectEngine.InjectedVcTargetsPath);
             var buildId = $"b-{Interlocked.Increment(ref _buildCounter)}";
             var command = $"{toolchain.MsBuildPath} {string.Join(" ", args)}";
 
-            newJob = new BuildJob(psi, buildId, command, normalizedSln, targets, retention);
+            newJob = new BuildJob(psi, buildId, command, normalizedSln, targets, retention,
+                toolchain.Instance);
             _currentBuild?.Dispose();
             _currentBuild = newJob;
         }
@@ -703,8 +718,8 @@ public sealed class BuildManager : IDisposable
         };
     }
 
-    private static ProcessStartInfo CreateProcessStartInfo(VsToolchain toolchain,
-        string solutionPath, List<string> args)
+    internal static ProcessStartInfo CreateProcessStartInfo(VsToolchain toolchain,
+        string solutionPath, List<string> args, string? injectedVcTargetsPath)
     {
         var psi = new ProcessStartInfo
         {
@@ -727,72 +742,16 @@ public sealed class BuildManager : IDisposable
             psi.Environment.Remove(key);
         }
 
+        // Don't leak the evaluation-side VCTargetsPath that ProjectEngine injected into this
+        // process — VS MSBuild.exe resolves its own C++ targets. A user-provided value is kept.
+        if (injectedVcTargetsPath != null &&
+            psi.Environment.TryGetValue("VCTargetsPath", out var vcTargets) &&
+            string.Equals(vcTargets, injectedVcTargetsPath, StringComparison.OrdinalIgnoreCase))
+        {
+            psi.Environment.Remove("VCTargetsPath");
+        }
+
         return psi;
     }
-
-    private static VsToolchain DiscoverVsToolchain()
-    {
-        var vswhere = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            @"Microsoft Visual Studio\Installer\vswhere.exe");
-        if (!File.Exists(vswhere))
-            throw new FileNotFoundException(
-                "vswhere.exe not found — is Visual Studio installed?", vswhere);
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = vswhere,
-            Arguments = "-latest -requires Microsoft.Component.MSBuild -property installationPath",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var vsProc = Process.Start(psi)!;
-        var vsInstallPath = vsProc.StandardOutput.ReadLine()?.Trim();
-        vsProc.WaitForExit();
-        if (string.IsNullOrEmpty(vsInstallPath))
-            throw new FileNotFoundException("VS installation not found via vswhere");
-
-        Console.Error.WriteLine($"msbuild-mcp: VS install: {vsInstallPath}");
-
-        var msbuildPath = Path.Combine(vsInstallPath, @"MSBuild\Current\Bin\amd64\MSBuild.exe");
-        if (!File.Exists(msbuildPath))
-        {
-            msbuildPath = Path.Combine(vsInstallPath, @"MSBuild\Current\Bin\MSBuild.exe");
-            if (!File.Exists(msbuildPath))
-                throw new FileNotFoundException($"MSBuild.exe not found under {vsInstallPath}");
-        }
-
-        Console.Error.WriteLine($"msbuild-mcp: MSBuild: {msbuildPath}");
-
-        var vcvarsall = Path.Combine(vsInstallPath, @"VC\Auxiliary\Build\vcvarsall.bat");
-        if (!File.Exists(vcvarsall))
-            throw new FileNotFoundException(
-                "vcvarsall.bat not found — VC++ build tools may not be installed", vcvarsall);
-
-        psi = new ProcessStartInfo
-        {
-            FileName = "cmd.exe",
-            Arguments = $"/c \"\"{vcvarsall}\" amd64 && set\"",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var envProc = Process.Start(psi)!;
-        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        while (envProc.StandardOutput.ReadLine() is { } line)
-        {
-            var eq = line.IndexOf('=');
-            if (eq > 0)
-                env[line[..eq]] = line[(eq + 1)..];
-        }
-        envProc.WaitForExit();
-
-        Console.Error.WriteLine($"msbuild-mcp: captured {env.Count} environment variables from vcvarsall");
-
-        return new VsToolchain(msbuildPath, env);
-    }
-
-    private sealed record VsToolchain(string MsBuildPath, Dictionary<string, string> Environment);
 }
 
