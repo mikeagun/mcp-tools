@@ -100,12 +100,18 @@ server.RegisterTool(new ToolInfo
 When `RawResult = true`, the handler must return a `JsonObject` with a well-formed `content` array. If the handler returns `null` or a non-`JsonObject`, it falls back to the default wrapping behavior.
 
 ### Framing Auto-Detection
-The transport auto-detects Content-Length vs NDJSON framing from the first non-whitespace byte. `{` → NDJSON, anything else → Content-Length headers. This is locked for the session after first detection.
+The transport auto-detects Content-Length vs NDJSON framing from the first non-whitespace byte, after skipping an optional UTF-8 BOM. `{` or `[` → NDJSON, anything else → Content-Length headers. This is locked for the session after first detection. Message bytes are decoded as UTF-8 in both framings.
 
 ### JSON-RPC 2.0 Compliance
 - Requests with `id` get responses; notifications (no `id`) do not
 - Unknown methods throw `InvalidOperationException` → JSON-RPC error code -32603
 - `notifications/initialized` and `notifications/cancelled` are silently accepted
+- Bad input never stops the reader thread:
+  - Unparseable JSON → `-32700` with `id: null`.
+  - A non-object message (including batch arrays) → `-32600`.
+  - A request with a non-string `method` or an invalid `id` type → `-32600`.
+  - Malformed notifications and responses that cannot be routed are logged to stderr and dropped.
+  - A Content-Length header block without a valid length is skipped.
 
 ### Form-Mode Elicitation (`McpSharp.Elicitation`)
 `McpServer.Elicit(...)` sends a `2025-11-25` form-mode elicitation to the client and returns an `ElicitationResult` (null when the client did not advertise form mode). The dependency-free engine is split into `FormSchemaBuilder` (schema construction, flat-object + sensitive-field guards), `ElicitationPlanner` (single-shot F1/F4/F5/F6 rewrites), `ElicitationDriver` (F2/F3/F8 round-trips + decision-field deny-safety), and `FormValidator` (server-side validation). Capabilities are parsed at `initialize`; an empty `elicitation: {}` means form-only.

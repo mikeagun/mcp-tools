@@ -64,27 +64,18 @@ public sealed class McpTransport
             {
                 while (true)
                 {
-                    var msg = ReadMessage();
-                    if (msg == null) break;
+                    var status = ReadNext(out var msg);
+                    if (status == ReadStatus.Eof) break;
 
-                    if (IsResponse(msg))
+                    if (status == ReadStatus.ParseError)
                     {
-                        var id = msg["id"]?.GetValue<string>();
-                        if (id != null)
-                        {
-                            lock (_responseRoutingLock)
-                            {
-                                if (_responseWaiters.TryRemove(id, out var tcs))
-                                    tcs.TrySetResult(msg);
-                                else
-                                    _earlyResponses[id] = msg;
-                            }
-                        }
+                        WriteError(null, -32700, "Parse error");
+                        continue;
                     }
-                    else
-                    {
-                        _requestQueue.Add(msg);
-                    }
+
+                    if (status == ReadStatus.Skipped) continue;
+
+                    RouteMessage(msg);
                 }
             }
             catch (Exception ex)
@@ -106,14 +97,91 @@ public sealed class McpTransport
     }
 
     /// <summary>
-    /// Classify a message as a response (has "result" or "error", no "method").
+    /// Validate an inbound message's JSON-RPC shape and route it: requests and
+    /// notifications go to the request queue, responses go to a waiting
+    /// server-initiated request. Invalid requests get a <c>-32600</c> error;
+    /// malformed notifications and unroutable responses are logged and dropped.
     /// </summary>
-    private static bool IsResponse(JsonNode msg)
+    private void RouteMessage(JsonNode? msg)
     {
-        var obj = msg.AsObject();
-        return !obj.ContainsKey("method")
-            && (obj.ContainsKey("result") || obj.ContainsKey("error"));
+        if (msg is not JsonObject obj)
+        {
+            Log("ignoring message that is not a JSON object");
+            WriteError(null, -32600, "Invalid Request: expected a JSON object");
+            return;
+        }
+
+        var idNode = obj["id"];
+        var idValid = IsValidId(idNode);
+
+        if (obj.ContainsKey("method"))
+        {
+            var isNotification = idNode is null;
+            if (!idValid)
+            {
+                Log("ignoring request with an invalid id type");
+                WriteError(null, -32600, "Invalid Request: id must be a string or number");
+                return;
+            }
+            if (obj["method"] is not JsonValue methodValue || methodValue.GetValueKind() != JsonValueKind.String)
+            {
+                Log("ignoring message with a non-string method");
+                if (!isNotification)
+                    WriteError(idNode, -32600, "Invalid Request: method must be a string");
+                return;
+            }
+
+            _requestQueue.Add(obj);
+            return;
+        }
+
+        if (obj.ContainsKey("result") || obj.ContainsKey("error"))
+        {
+            var key = idValid ? IdKey(idNode) : null;
+            if (key == null)
+            {
+                Log("ignoring response without a usable id");
+                return;
+            }
+
+            lock (_responseRoutingLock)
+            {
+                if (_responseWaiters.TryRemove(key, out var tcs))
+                    tcs.TrySetResult(obj);
+                else
+                    _earlyResponses[key] = obj;
+            }
+            return;
+        }
+
+        Log("ignoring message that is neither a request nor a response");
+        WriteError(idValid ? idNode : null, -32600, "Invalid Request: missing method");
     }
+
+    /// <summary>JSON-RPC ids are strings or numbers; null/absent marks a notification.</summary>
+    private static bool IsValidId(JsonNode? id)
+        => id is null
+            || (id is JsonValue v && v.GetValueKind() is JsonValueKind.String or JsonValueKind.Number);
+
+    /// <summary>Routing key for a response id (string value, or the number's JSON text).</summary>
+    private static string? IdKey(JsonNode? id) => id switch
+    {
+        JsonValue v when v.GetValueKind() == JsonValueKind.String => v.GetValue<string>(),
+        JsonValue v when v.GetValueKind() == JsonValueKind.Number => v.ToJsonString(),
+        _ => null,
+    };
+
+    private void WriteError(JsonNode? id, int code, string message)
+    {
+        WriteMessage(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id?.DeepClone(),
+            ["error"] = new JsonObject { ["code"] = code, ["message"] = message },
+        });
+    }
+
+    private void Log(string message) => Console.Error.WriteLine($"{_logPrefix}: {message}");
 
     // ── Response waiters (used by Elicit()) ─────────────────────
 
@@ -320,127 +388,191 @@ public sealed class McpTransport
 
     // ── Stream reading (used by reader thread) ──────────────────
 
+    private enum ReadStatus { Message, ParseError, Skipped, Eof }
+
     /// <summary>
-    /// Read a single message directly from the input stream (blocking).
-    /// In production, the reader thread calls this. Tests may call it directly.
+    /// Read the next parseable message directly from the input stream (blocking).
+    /// Unparseable or unframeable input is logged and skipped; returns null only
+    /// at end of stream. In production the reader thread reads the stream (and
+    /// additionally answers unparseable input with a <c>-32700</c> error).
+    /// Tests may call this directly, e.g. to prime framing detection.
     /// </summary>
     public JsonNode? ReadMessage()
     {
-        if (_framing == Framing.Unknown)
+        while (true)
         {
-            int ch;
-            while ((ch = _input.ReadByte()) != -1)
-            {
-                if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue;
-                if (ch == '{')
-                {
-                    _framing = Framing.Ndjson;
-                    Console.Error.WriteLine($"{_logPrefix}: using NDJSON framing");
-                    var sb = new StringBuilder();
-                    sb.Append((char)ch);
-                    int c;
-                    while ((c = _input.ReadByte()) != -1 && c != '\n')
-                    {
-                        sb.Append((char)c);
-                    }
-                    var line = sb.ToString().TrimEnd('\r');
-                    try { return JsonNode.Parse(line); }
-                    catch { return null; }
-                }
-                else
-                {
-                    _framing = Framing.ContentLength;
-                    Console.Error.WriteLine($"{_logPrefix}: using Content-Length framing");
-                    var sb = new StringBuilder();
-                    sb.Append((char)ch);
-                    return ReadContentLength(sb);
-                }
-            }
-            return null;
+            var status = ReadNext(out var msg);
+            if (status == ReadStatus.Eof) return null;
+            if (status == ReadStatus.Message && msg != null) return msg;
         }
-
-        return _framing == Framing.Ndjson ? ReadNdjson() : ReadContentLength(null);
     }
 
-    private JsonNode? ReadContentLength(StringBuilder? prefixBuilder)
+    /// <summary>
+    /// Read one framed unit from the stream. Framing is auto-detected from the
+    /// first non-whitespace byte (after an optional UTF-8 BOM): <c>{</c> or
+    /// <c>[</c> selects NDJSON, anything else selects Content-Length headers.
+    /// </summary>
+    private ReadStatus ReadNext(out JsonNode? message)
     {
-        int contentLength = 0;
-        bool found = false;
+        message = null;
+        List<byte>? prefix = null;
 
-        string? firstLine;
-        if (prefixBuilder != null)
+        if (_framing == Framing.Unknown)
         {
-            int c;
-            while ((c = _input.ReadByte()) != -1 && c != '\n')
-                prefixBuilder.Append((char)c);
-            firstLine = prefixBuilder.ToString().TrimEnd('\r');
-        }
-        else
-        {
-            firstLine = ReadLine();
+            prefix = DetectFraming();
+            if (prefix == null) return ReadStatus.Eof;
         }
 
-        if (firstLine == null) return null;
+        return _framing == Framing.Ndjson
+            ? ReadNdjson(prefix, out message)
+            : ReadContentLength(prefix, out message);
+    }
 
-        var line = firstLine;
-        while (!string.IsNullOrEmpty(line))
+    /// <summary>
+    /// Consume leading whitespace and an optional UTF-8 BOM, select the framing,
+    /// and return the bytes already consumed from the first message (null at EOF).
+    /// </summary>
+    private List<byte>? DetectFraming()
+    {
+        bool first = true;
+        int ch;
+        while ((ch = _input.ReadByte()) != -1)
         {
-            if (line.StartsWith("Content-Length: ", StringComparison.OrdinalIgnoreCase))
+            if (first && ch == 0xEF)
             {
-                if (int.TryParse(line.AsSpan(16), out var len))
-                {
-                    contentLength = len;
-                    found = true;
-                }
+                first = false;
+                int b1 = _input.ReadByte();
+                int b2 = b1 == 0xBB ? _input.ReadByte() : -1;
+                if (b1 == 0xBB && b2 == 0xBF) continue;
+
+                var consumed = new List<byte> { 0xEF };
+                if (b1 != -1) consumed.Add((byte)b1);
+                if (b2 != -1) consumed.Add((byte)b2);
+                return SelectFraming(Framing.ContentLength, consumed);
             }
-            line = ReadLine();
-            if (line == null) return null;
+
+            first = false;
+            if (ch is ' ' or '\t' or '\r' or '\n') continue;
+
+            return SelectFraming(
+                ch is '{' or '[' ? Framing.Ndjson : Framing.ContentLength,
+                new List<byte> { (byte)ch });
+        }
+        return null;
+    }
+
+    private List<byte> SelectFraming(Framing framing, List<byte> consumed)
+    {
+        _framing = framing;
+        Log(framing == Framing.Ndjson ? "using NDJSON framing" : "using Content-Length framing");
+        return consumed;
+    }
+
+    private ReadStatus ReadNdjson(List<byte>? prefix, out JsonNode? message)
+    {
+        message = null;
+        while (true)
+        {
+            var line = ReadLineBytes(prefix);
+            prefix = null;
+            if (line == null) return ReadStatus.Eof;
+
+            var text = Encoding.UTF8.GetString(line).TrimStart('\uFEFF');
+            if (string.IsNullOrWhiteSpace(text)) continue;
+            return TryParse(text, out message);
+        }
+    }
+
+    private ReadStatus ReadContentLength(List<byte>? prefix, out JsonNode? message)
+    {
+        message = null;
+        int? contentLength = null;
+        bool inHeaders = false;
+
+        while (true)
+        {
+            var lineBytes = ReadLineBytes(prefix);
+            prefix = null;
+            if (lineBytes == null) return ReadStatus.Eof;
+
+            var line = Encoding.UTF8.GetString(lineBytes);
+            if (line.Length == 0)
+            {
+                // Blank lines before a header block are tolerated; one after
+                // headers terminates the block.
+                if (inHeaders) break;
+                continue;
+            }
+
+            inHeaders = true;
+            const string header = "Content-Length:";
+            if (line.StartsWith(header, StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(line.AsSpan(header.Length).Trim(), out var len)
+                && len >= 0)
+            {
+                contentLength = len;
+            }
         }
 
-        if (!found) return null;
-
-        var buf = new byte[contentLength];
-        int read = 0;
-        while (read < contentLength)
+        if (contentLength == null)
         {
-            int n = _input.Read(buf, read, contentLength - read);
-            if (n == 0) return null;
+            Log("skipping header block without a valid Content-Length");
+            return ReadStatus.Skipped;
+        }
+
+        var buf = new byte[contentLength.Value];
+        int read = 0;
+        while (read < buf.Length)
+        {
+            int n = _input.Read(buf, read, buf.Length - read);
+            if (n == 0) return ReadStatus.Eof;
             read += n;
         }
 
-        try { return JsonNode.Parse(Encoding.UTF8.GetString(buf)); }
-        catch { return null; }
+        return TryParse(Encoding.UTF8.GetString(buf), out message);
     }
 
-    private JsonNode? ReadNdjson()
+    private ReadStatus TryParse(string text, out JsonNode? message)
     {
-        while (true)
+        try
         {
-            var line = ReadLine();
-            if (line == null) return null;
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            try { return JsonNode.Parse(line); }
-            catch { return null; }
+            message = JsonNode.Parse(text);
+            return ReadStatus.Message;
+        }
+        catch (JsonException ex)
+        {
+            message = null;
+            Log($"parse error: {ex.Message}");
+            return ReadStatus.ParseError;
         }
     }
 
-    private string? ReadLine()
+    /// <summary>
+    /// Read raw bytes up to (not including) the next <c>\n</c>, dropping a
+    /// trailing <c>\r</c>. Bytes are decoded by the caller as UTF-8. Returns
+    /// null at end of stream when no bytes were read.
+    /// </summary>
+    private byte[]? ReadLineBytes(List<byte>? prefix)
     {
-        var sb = new StringBuilder();
+        var buf = prefix ?? new List<byte>();
+        bool any = buf.Count > 0;
         int ch;
         while ((ch = _input.ReadByte()) != -1)
         {
             if (ch == '\n')
-            {
-                var s = sb.ToString();
-                if (s.EndsWith('\r')) s = s[..^1];
-                return s;
-            }
-            sb.Append((char)ch);
+                return TrimCr(buf);
+            buf.Add((byte)ch);
+            any = true;
         }
-        return sb.Length > 0 ? sb.ToString() : null;
+        return any ? TrimCr(buf) : null;
     }
 
+    private static byte[] TrimCr(List<byte> buf)
+    {
+        if (buf.Count > 0 && buf[^1] == '\r')
+            buf.RemoveAt(buf.Count - 1);
+        return buf.ToArray();
+    }
     private readonly Lock _writeLock = new();
 
     public void WriteMessage(JsonNode msg)

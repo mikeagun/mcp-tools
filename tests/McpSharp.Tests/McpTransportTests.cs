@@ -269,19 +269,19 @@ public class McpTransportTests
     }
 
     [Fact]
-    public void ReadMessage_InvalidJson_ReturnsNull()
+    public void ReadMessage_UnframedGarbageThenEof_ReturnsNull()
     {
         var input = new MemoryStream(Encoding.UTF8.GetBytes("not json at all\n"));
         var output = new MemoryStream();
         var transport = new McpTransport(input, output, "test");
 
         // First read detects NDJSON (starts with 'n', not '{'), falls to Content-Length
-        // Content-Length expects "Content-Length: N" but gets "not json...", returns null
+        // The unframeable header block is skipped; end of stream then yields null
         Assert.Null(transport.ReadMessage());
     }
 
     [Fact]
-    public void ContentLength_NoContentLengthHeader_ReturnsNull()
+    public void ContentLength_HeaderBlockWithoutLength_SkippedUntilEof()
     {
         // Header that doesn't contain Content-Length
         var input = new MemoryStream(Encoding.UTF8.GetBytes("X-Custom: foo\r\n\r\n{}\r\n"));
@@ -289,10 +289,193 @@ public class McpTransportTests
         var transport = new McpTransport(input, output, "test");
 
         // 'X' is not '{' so Content-Length framing is selected
-        // But "X-Custom: foo" is not a Content-Length header, returns null
+        // The header block has no Content-Length, so it is skipped; end of stream then yields null
         Assert.Null(transport.ReadMessage());
     }
 
+    // ── Robustness: encoding and malformed input ─────────────────
+
+    private static readonly Func<string, JsonNode?, JsonNode?> EchoText =
+        (_, p) => new JsonObject { ["echo"] = p?["text"]?.DeepClone() };
+
+    private static JsonNode ResponseFor(List<JsonNode> messages, int id)
+        => messages.Single(m => m["id"] is JsonValue v && v.GetValueKind() == System.Text.Json.JsonValueKind.Number && v.GetValue<int>() == id);
+
+    private static JsonNode ErrorWithCode(List<JsonNode> messages, int code)
+        => messages.Single(m => m["error"]?["code"]?.GetValue<int>() == code);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NonAsciiText_RoundTripsIntact(bool contentLength)
+    {
+        const string text = "caf\u00e9 \u65e5\u672c \U0001F600";
+        // Clients send raw (unescaped) UTF-8, so build the requests by hand;
+        // JsonNode.ToJsonString() would escape non-ASCII as \uXXXX.
+        var requests = new[]
+        {
+            $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"echo\",\"params\":{{\"text\":\"{text}\"}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"echo\",\"params\":{{\"text\":\"{text}\"}}}}",
+        };
+        var input = contentLength ? MakeContentLengthInput(requests) : MakeNdjsonInput(requests);
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run(EchoText);
+
+        var responses = contentLength ? ParseContentLengthOutput(output) : ParseNdjsonOutput(output);
+        Assert.Equal(2, responses.Count);
+        // The first message exercises the framing-detection path; the second the steady-state path.
+        Assert.All(responses, r => Assert.Equal(text, r["result"]!["echo"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void Ndjson_LeadingUtf8Bom_IsIgnored()
+    {
+        var bytes = new byte[] { 0xEF, 0xBB, 0xBF }
+            .Concat(Encoding.UTF8.GetBytes(MakeJsonRpcRequest(1, "echo", new JsonObject { ["text"] = "hi" }) + "\n"))
+            .ToArray();
+        var output = new MemoryStream();
+        var transport = new McpTransport(new MemoryStream(bytes), output, "test");
+
+        transport.Run(EchoText);
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal("hi", response["result"]!["echo"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Ndjson_InvalidUtf8_IsReplacedNotFatal()
+    {
+        var line = Encoding.UTF8.GetBytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"echo\",\"params\":{\"text\":\"a")
+            .Concat(new byte[] { 0xFF })
+            .Concat(Encoding.UTF8.GetBytes("b\"}}\n"))
+            .ToArray();
+        var output = new MemoryStream();
+        var transport = new McpTransport(new MemoryStream(line), output, "test");
+
+        transport.Run(EchoText);
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal("a\uFFFDb", response["result"]!["echo"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Ndjson_ParseError_RespondsAndKeepsServing()
+    {
+        var input = MakeNdjsonInput(
+            MakeJsonRpcRequest(1, "tools/list"),
+            "{this is not json",
+            MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(3, messages.Count);
+        var parseError = ErrorWithCode(messages, -32700);
+        Assert.Null(parseError["id"]);
+        Assert.True(parseError.AsObject().ContainsKey("id"));
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Fact]
+    public void ContentLength_ParseError_RespondsAndKeepsServing()
+    {
+        var input = MakeContentLengthInput(
+            MakeJsonRpcRequest(1, "tools/list"),
+            "{not json}",
+            MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseContentLengthOutput(output);
+        Assert.Equal(3, messages.Count);
+        Assert.Null(ErrorWithCode(messages, -32700)["id"]);
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Fact]
+    public void ContentLength_HeaderBlockWithoutLength_SkipsAndKeepsServing()
+    {
+        var request = MakeJsonRpcRequest(1, "tools/list");
+        var raw = "X-Custom: foo\r\n\r\n"
+            + $"Content-Length: {Encoding.UTF8.GetByteCount(request)}\r\n\r\n{request}";
+        var output = new MemoryStream();
+        var transport = new McpTransport(new MemoryStream(Encoding.UTF8.GetBytes(raw)), output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var response = Assert.Single(ParseContentLengthOutput(output));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+    }
+
+    [Theory]
+    [InlineData("[1,2]", null)]
+    [InlineData("\"str\"", null)]
+    [InlineData("42", null)]
+    [InlineData("null", null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":7}", 5)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"x\"}", null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":9}", 9)]
+    public void Ndjson_InvalidRequest_RespondsAndKeepsServing(string invalid, int? expectedId)
+    {
+        // A valid first line establishes NDJSON framing (a scalar first line
+        // would select Content-Length framing by design).
+        var input = MakeNdjsonInput(
+            MakeJsonRpcRequest(1, "tools/list"), invalid, MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(3, messages.Count);
+        var error = ErrorWithCode(messages, -32600);
+        if (expectedId is null)
+            Assert.Null(error["id"]);
+        else
+            Assert.Equal(expectedId, error["id"]!.GetValue<int>());
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Fact]
+    public void Ndjson_NotificationWithNonStringMethod_DroppedSilently()
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"method\":5}",
+            MakeJsonRpcRequest(1, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void Ndjson_UnroutableResponses_DoNotStopReader()
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":{\"x\":1},\"result\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"m\"}}",
+            MakeJsonRpcRequest(1, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+    }
     // ── Integration: full round-trip with McpServer ──────────────
 
     [Fact]
