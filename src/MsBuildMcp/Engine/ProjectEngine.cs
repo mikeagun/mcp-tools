@@ -17,7 +17,14 @@ public sealed class ProjectEngine : IDisposable
     private static bool _locatorRegistered;
     private static readonly object _locatorLock = new();
 
-    public static void EnsureMsBuildRegistered()
+    /// <summary>
+    /// The VCTargetsPath this process set in its own environment for evaluation, or null if
+    /// none was injected (e.g. the user already set VCTargetsPath, or no VS C++ targets were found).
+    /// </summary>
+    internal static string? InjectedVcTargetsPath { get; private set; }
+
+    /// <param name="vs">VS selection to use for C++ evaluation; defaults to <c>MSBUILD_MCP_VS</c> / latest.</param>
+    public static void EnsureMsBuildRegistered(VsToolchainProvider? vs = null)
     {
         lock (_locatorLock)
         {
@@ -30,17 +37,8 @@ public sealed class ProjectEngine : IDisposable
                 // host process. But the dotnet SDK MSBuild evaluates C++ projects fine when
                 // VCTargetsPath is set as an environment variable.
 
-                // Step 1: Discover VS install for VCTargetsPath (needed for C++ evaluation)
-                var vsPath = DiscoverVsInstallPath();
-                if (vsPath != null)
-                {
-                    var vcTargets = Path.Combine(vsPath, @"MSBuild\Microsoft\VC\v170\");
-                    if (Directory.Exists(vcTargets) && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("VCTargetsPath")))
-                    {
-                        Environment.SetEnvironmentVariable("VCTargetsPath", vcTargets);
-                        Console.Error.WriteLine($"msbuild-mcp: VCTargetsPath={vcTargets}");
-                    }
-                }
+                // Step 1: Resolve the selected VS install for VCTargetsPath (needed for C++ evaluation)
+                ApplyVcTargetsPath(vs ?? VsToolchainProvider.FromEnvironment());
 
                 // Step 2: Register dotnet SDK MSBuild (has working NuGet/DotNet SDK resolvers)
                 var instance = MSBuildLocator.RegisterDefaults();
@@ -51,33 +49,42 @@ public sealed class ProjectEngine : IDisposable
         }
     }
 
-    private static string? DiscoverVsInstallPath()
+    private static void ApplyVcTargetsPath(VsToolchainProvider vs)
     {
-        var vswhere = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            @"Microsoft Visual Studio\Installer\vswhere.exe");
-        if (!File.Exists(vswhere)) return null;
-
+        VsInstance selected;
         try
         {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = vswhere,
-                Arguments = "-latest -requires Microsoft.Component.MSBuild -property installationPath",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            using var proc = System.Diagnostics.Process.Start(psi)!;
-            var path = proc.StandardOutput.ReadLine()?.Trim();
-            proc.WaitForExit();
-            return string.IsNullOrEmpty(path) ? null : path;
+            selected = vs.ResolveInstance();
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"msbuild-mcp: vswhere failed: {ex.Message}");
-            return null;
+            // Non-fatal: .NET projects still evaluate; builds report the same error.
+            Console.Error.WriteLine($"msbuild-mcp: Visual Studio selection failed: {ex.Message}");
+            return;
         }
+
+        Console.Error.WriteLine($"msbuild-mcp: Visual Studio: {selected.Describe()}" +
+            (vs.DefaultSpec != null ? $" (selected by '{vs.DefaultSpec}')" : ""));
+
+        if (selected.VcTargetsPath == null)
+        {
+            Console.Error.WriteLine("msbuild-mcp: no C++ targets found in selected Visual Studio — C++ evaluation unavailable");
+            return;
+        }
+
+        var existing = Environment.GetEnvironmentVariable("VCTargetsPath");
+        if (!string.IsNullOrEmpty(existing))
+        {
+            if (!string.Equals(existing.TrimEnd('\\'), selected.VcTargetsPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                Console.Error.WriteLine(
+                    $"msbuild-mcp: warning: keeping user-set VCTargetsPath={existing} " +
+                    $"(selected Visual Studio uses {selected.VcTargetsPath})");
+            return;
+        }
+
+        Environment.SetEnvironmentVariable("VCTargetsPath", selected.VcTargetsPath);
+        InjectedVcTargetsPath = selected.VcTargetsPath;
+        Console.Error.WriteLine($"msbuild-mcp: VCTargetsPath={selected.VcTargetsPath}");
     }
 
     /// <summary>

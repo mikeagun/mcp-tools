@@ -7,7 +7,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 ### Prerequisites
 
 - [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with C++ desktop development workload (for MsBuildMcp)
+- [Visual Studio 2022 or later](https://visualstudio.microsoft.com/) with C++ desktop development workload (for MsBuildMcp)
 - Hyper-V enabled on Windows (for HyperVMcp)
 - Git
 

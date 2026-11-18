@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Cross-project queries: `find_property`, `find_packages`, `diff_configurations`
   - Prompts: `diagnose-build-failure`, `what-to-build`, `impact-analysis`, `resolve-nuget-issue`, `explain-build-config`
   - Dual MSBuild strategy (dotnet SDK evaluation + VS MSBuild builds)
+  - Visual Studio version selection for side-by-side installs (e.g. VS 2022 + VS 2026): `--vs <selector>` / `MSBUILD_MCP_VS` accept `latest`, a product year (`2022`), a version prefix (`17.14`), a version range (`[17,18)`), or an installation path; C++ evaluation and builds use the same selected installation, and build status reports it as `visual_studio`
   - `publish` uses `dotnet` CLI directly (not VS MSBuild) for .NET SDK projects
   - Policy-based guardrails with MCP elicitation
 
@@ -56,3 +57,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **CiDebugMcp** — Authentication-failure retries prompt the user via elicitation (the server wires `McpServer.Transport`) instead of failing straight to a STOP error.
 - **McpSharp** — The two-prompt persistence follow-up (`PolicyDispatch`) honors the configured elicitation timeout rather than blocking indefinitely.
+- **MsBuildMcp** — C++ project evaluation no longer fails when Visual Studio 2026 is installed: `VCTargetsPath` is now the highest complete `MSBuild\Microsoft\VC\vNNN` directory (VS 2026 uses `v180`; its `v170` folder is an incomplete stub) instead of a hard-coded `v170`.
+- **MsBuildMcp** — Visual Studio Build Tools and prerelease installations are now discovered (stable installations are still preferred), and a failing `vcvarsall.bat` is reported instead of silently starting a build without the VC environment.

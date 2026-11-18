@@ -24,6 +24,9 @@ public sealed record BuildStatus
     public bool IsCompleted { get; init; }
     public List<string>? OutputTail { get; set; }
     public BuildCollision? Collision { get; set; }
+
+    /// <summary>VS installation that ran the build (null for dotnet publish).</summary>
+    public VsInstance? VisualStudio { get; init; }
 }
 
 /// <summary>
