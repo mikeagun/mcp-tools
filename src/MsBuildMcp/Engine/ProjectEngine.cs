@@ -14,8 +14,18 @@ namespace MsBuildMcp.Engine;
 public sealed class ProjectEngine : IDisposable
 {
     private readonly ConcurrentDictionary<string, CachedProject> _cache = new();
+    private readonly VsToolchainProvider _vs;
     private static bool _locatorRegistered;
     private static readonly object _locatorLock = new();
+
+    /// <summary>Uses the shared vswhere locator with <c>MSBUILD_MCP_VS</c> as the default selector.</summary>
+    public ProjectEngine() : this(VsToolchainProvider.FromEnvironment()) { }
+
+    /// <param name="vs">Resolves per-call <c>vs</c> selectors passed to <see cref="Evaluate"/>.</param>
+    public ProjectEngine(VsToolchainProvider vs)
+    {
+        _vs = vs;
+    }
 
     /// <summary>
     /// The VCTargetsPath this process set in its own environment for evaluation, or null if
@@ -91,9 +101,14 @@ public sealed class ProjectEngine : IDisposable
     /// Evaluate a project file with the given global properties.
     /// Returns a snapshot of the evaluated state.
     /// </summary>
+    /// <param name="vs">
+    /// Optional Visual Studio selector (see <see cref="VsSelector"/>). When it resolves to an
+    /// installation other than the one whose C++ targets this process uses by default, that
+    /// installation's VCTargetsPath is applied for this evaluation only.
+    /// </param>
     public ProjectSnapshot Evaluate(string projectPath, string configuration = "Debug",
         string platform = "x64", string? solutionDir = null,
-        Dictionary<string, string>? additionalProperties = null)
+        Dictionary<string, string>? additionalProperties = null, string? vs = null)
     {
         projectPath = Path.GetFullPath(projectPath);
         if (!File.Exists(projectPath))
@@ -102,16 +117,45 @@ public sealed class ProjectEngine : IDisposable
         // Auto-infer SolutionDir if not provided
         solutionDir ??= InferSolutionDir(projectPath);
 
+        var vcTargetsPath = ResolveVcTargetsOverride(vs);
+
         var mtime = File.GetLastWriteTimeUtc(projectPath);
         var propsKey = BuildPropsKey(additionalProperties);
         var key = $"{projectPath}|{configuration}|{platform}|{solutionDir}|{propsKey}";
+        if (vcTargetsPath != null)
+            key += $"|vc={Uri.EscapeDataString(vcTargetsPath)}";
 
         if (_cache.TryGetValue(key, out var cached) && cached.Mtime == mtime)
             return cached.Snapshot;
 
-        var snapshot = EvaluateCore(projectPath, configuration, platform, solutionDir, additionalProperties);
+        var snapshot = EvaluateCore(projectPath, configuration, platform, solutionDir, additionalProperties, vcTargetsPath);
         _cache[key] = new CachedProject { Mtime = mtime, Snapshot = snapshot };
         return snapshot;
+    }
+
+    /// <summary>
+    /// Throw if a <c>vs</c> selector is invalid or matches no installation. Call before evaluation
+    /// loops that swallow per-project errors, so a bad selector is reported once.
+    /// </summary>
+    public void ValidateVs(string? vs)
+    {
+        if (!string.IsNullOrWhiteSpace(vs))
+            _vs.ResolveInstance(vs);
+    }
+
+    /// <summary>
+    /// VCTargetsPath to apply for an explicit <paramref name="vs"/> selector, or null to use the
+    /// process default (no selector, no C++ targets in the selected install, or it is already
+    /// the VCTargetsPath this process injected).
+    /// </summary>
+    private string? ResolveVcTargetsOverride(string? vs)
+    {
+        if (string.IsNullOrWhiteSpace(vs)) return null;
+        var vcTargets = _vs.ResolveInstance(vs).VcTargetsPath;
+        if (vcTargets == null) return null;
+        return string.Equals(vcTargets, InjectedVcTargetsPath, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : vcTargets;
     }
 
     /// <summary>
@@ -132,7 +176,7 @@ public sealed class ProjectEngine : IDisposable
     }
 
     private static ProjectSnapshot EvaluateCore(string projectPath, string configuration, string platform,
-        string? solutionDir, Dictionary<string, string>? additionalProperties)
+        string? solutionDir, Dictionary<string, string>? additionalProperties, string? vcTargetsPath = null)
     {
         var globalProps = new Dictionary<string, string>
         {
@@ -168,6 +212,8 @@ public sealed class ProjectEngine : IDisposable
         }
 
         using var collection = new ProjectCollection(globalProps);
+        if (vcTargetsPath != null)
+            SetToolsetProperty(collection, "VCTargetsPath", vcTargetsPath);
         var project = collection.LoadProject(projectPath);
 
         var snapshot = new ProjectSnapshot
@@ -374,6 +420,26 @@ public sealed class ProjectEngine : IDisposable
     public void InvalidateCache() => _cache.Clear();
 
     public void Dispose() => _cache.Clear();
+
+    /// <summary>
+    /// Override a property on the collection's default toolset. Toolset properties take precedence
+    /// over environment variables but — unlike global properties — can still be reassigned by
+    /// project files. The VC targets rely on that: Microsoft.Cpp.ToolsetLocation.props temporarily
+    /// redirects VCTargetsPath to locate platform toolsets from other VS versions. This mirrors how
+    /// VS's MSBuild.exe.config defines VCTargetsPath.
+    /// </summary>
+    private static void SetToolsetProperty(ProjectCollection collection, string name, string value)
+    {
+        var toolsVersion = collection.DefaultToolsVersion;
+        var toolset = collection.GetToolset(toolsVersion);
+        if (toolset == null) return;
+
+        var props = toolset.Properties.ToDictionary(
+            kv => kv.Key, kv => kv.Value.EvaluatedValue, StringComparer.OrdinalIgnoreCase);
+        props[name] = value;
+        collection.RemoveToolset(toolsVersion);
+        collection.AddToolset(new Toolset(toolsVersion, toolset.ToolsPath, props, collection, null));
+    }
 
     private sealed class CachedProject
     {

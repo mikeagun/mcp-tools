@@ -3,6 +3,7 @@
 
 using System.Text.Json.Nodes;
 using MsBuildMcp.Engine;
+using MsBuildMcp.Tools;
 using McpSharp;
 
 namespace MsBuildMcp.Prompts;
@@ -138,6 +139,12 @@ public static class PromptRegistration
                     Name = "additional_args",
                     Description = "Additional MSBuild arguments (e.g. '/p:Analysis=True', '/v:detailed')",
                     Required = false,
+                },
+                new PromptArgument
+                {
+                    Name = "vs",
+                    Description = "Visual Studio installation selector (e.g. '2022', '17.14', '[17,18)'). Default: server setting",
+                    Required = false,
                 }
             ],
             Handler = args =>
@@ -148,6 +155,8 @@ public static class PromptRegistration
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
                 var restore = args["restore"]?.GetValue<string>()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
                 var additionalArgs = args["additional_args"]?.GetValue<string>();
+                var vs = VsTools.GetVsArg(args);
+                projEngine.ValidateVs(vs);
                 var files = filesStr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
                 var solution = slnEngine.Parse(slnPath);
@@ -161,7 +170,7 @@ public static class PromptRegistration
                         var projFullPath = Path.GetFullPath(Path.Combine(solution.Directory, proj.RelativePath));
                         try
                         {
-                            var snapshot = projEngine.Evaluate(projFullPath, config, platform);
+                            var snapshot = projEngine.Evaluate(projFullPath, config, platform, vs: vs);
                             var projDir = Path.GetDirectoryName(projFullPath)!;
                             foreach (var (_, items) in snapshot.Items)
                             {
@@ -197,7 +206,7 @@ public static class PromptRegistration
                       msbuild "{slnPath}" /m /p:Configuration="{config}" /p:Platform="{platform}" /t:"{targets}"{restoreFlag}{addlArgsStr}
 
                     Or using the build tool:
-                      build(sln_path="{slnPath}", targets="{targets}", configuration="{config}", platform="{platform}"{(restore ? ", restore=true" : "")}{(!string.IsNullOrEmpty(additionalArgs) ? $", additional_args=\"{additionalArgs}\"" : "")})
+                      build(sln_path="{slnPath}", targets="{targets}", configuration="{config}", platform="{platform}"{(restore ? ", restore=true" : "")}{(!string.IsNullOrEmpty(additionalArgs) ? $", additional_args=\"{additionalArgs}\"" : "")}{(vs != null ? $", vs=\"{vs}\"" : "")})
 
                     If any changed files are headers (.h/.hpp), consider that dependent projects may also need rebuilding.
                     Use the get_dependency_graph tool to check for transitive dependents if needed.
@@ -381,6 +390,12 @@ public static class PromptRegistration
                     Name = "sln_path",
                     Description = "Path to .sln file (for SolutionDir resolution). Auto-inferred if omitted.",
                     Required = false,
+                },
+                new PromptArgument
+                {
+                    Name = "vs",
+                    Description = "Visual Studio installation selector for C++ evaluation (e.g. '2022'). Default: server setting",
+                    Required = false,
                 }
             ],
             Handler = args =>
@@ -390,12 +405,13 @@ public static class PromptRegistration
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
                 var slnPath = args["sln_path"]?.GetValue<string>();
                 var solutionDir = slnPath != null ? Path.GetDirectoryName(Path.GetFullPath(slnPath)) + Path.DirectorySeparatorChar : null;
+                var vs = VsTools.GetVsArg(args);
 
                 ProjectSnapshot? snapshot = null;
                 string evalResult;
                 try
                 {
-                    snapshot = projEngine.Evaluate(path, config, platform, solutionDir);
+                    snapshot = projEngine.Evaluate(path, config, platform, solutionDir, vs: vs);
                     var propList = string.Join("\n", snapshot.Properties
                         .OrderBy(kv => kv.Key)
                         .Select(kv => $"  {kv.Key} = {kv.Value}"));

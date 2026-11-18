@@ -49,6 +49,7 @@ public static class ProjectTools
                         ["type"] = "object",
                         ["description"] = "Additional MSBuild global properties to set during evaluation",
                     },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath)"),
                     ["properties"] = new JsonObject
                     {
                         ["type"] = "array",
@@ -70,7 +71,7 @@ public static class ProjectTools
                 var addlProps = ParseAdditionalProperties(args["additional_properties"]);
                 var propsFilter = args["properties"]?.AsArray()
                     .Select(n => n!.GetValue<string>()).ToList();
-                var snapshot = engine.Evaluate(path, config, platform, solutionDir, addlProps);
+                var snapshot = engine.Evaluate(path, config, platform, solutionDir, addlProps, VsTools.GetVsArg(args));
                 return SnapshotToJson(snapshot, propsFilter);
             },
         });
@@ -89,6 +90,7 @@ public static class ProjectTools
                     ["file_path"] = new JsonObject { ["type"] = "string", ["description"] = "Source file path to search for" },
                     ["configuration"] = new JsonObject { ["type"] = "string", ["default"] = "Debug" },
                     ["platform"] = new JsonObject { ["type"] = "string", ["default"] = "x64" },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath)"),
                 },
                 ["required"] = new JsonArray("sln_path", "file_path"),
             },
@@ -98,6 +100,8 @@ public static class ProjectTools
                 var fileArg = args["file_path"]!.GetValue<string>();
                 var config = args["configuration"]?.GetValue<string>() ?? "Debug";
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
+                var vs = VsTools.GetVsArg(args);
+                engine.ValidateVs(vs);
 
                 // Support both full paths and bare filenames
                 var isFullPath = Path.IsPathRooted(fileArg);
@@ -115,7 +119,7 @@ public static class ProjectTools
                     var projFullPath = Path.GetFullPath(Path.Combine(solution.Directory, proj.RelativePath));
                     try
                     {
-                        var snapshot = engine.Evaluate(projFullPath, config, platform, solutionDir);
+                        var snapshot = engine.Evaluate(projFullPath, config, platform, solutionDir, vs: vs);
                         evaluated++;
                         var projDir = Path.GetDirectoryName(projFullPath)!;
 
@@ -192,6 +196,7 @@ public static class ProjectTools
                         ["type"] = "string",
                         ["description"] = "Path to .sln file (for SolutionDir). Auto-inferred if omitted.",
                     },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath)"),
                 },
                 ["required"] = new JsonArray("project_path"),
             },
@@ -202,7 +207,7 @@ public static class ProjectTools
                 var platform = args["platform"]?.GetValue<string>() ?? "x64";
                 var slnPath = args["sln_path"]?.GetValue<string>();
                 var solutionDir = slnPath != null ? Path.GetDirectoryName(Path.GetFullPath(slnPath)) + Path.DirectorySeparatorChar : null;
-                var snapshot = engine.Evaluate(path, config, platform, solutionDir);
+                var snapshot = engine.Evaluate(path, config, platform, solutionDir, vs: VsTools.GetVsArg(args));
 
                 var filterTypes = args["item_types"]?.AsArray()
                     .Select(n => n!.GetValue<string>())
@@ -273,6 +278,7 @@ public static class ProjectTools
                         ["description"] = "Filter imports by path substring (case-insensitive). " +
                                           "E.g. 'wdk' to find WDK-related imports, 'Directory.Build' for repo-level props.",
                     },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath)"),
                 },
                 ["required"] = new JsonArray("project_path"),
             },
@@ -285,7 +291,7 @@ public static class ProjectTools
                 var solutionDir = slnPath != null ? Path.GetDirectoryName(Path.GetFullPath(slnPath)) + Path.DirectorySeparatorChar : null;
                 var filter = args["filter"]?.GetValue<string>();
 
-                var snapshot = engine.Evaluate(path, config, platform, solutionDir);
+                var snapshot = engine.Evaluate(path, config, platform, solutionDir, vs: VsTools.GetVsArg(args));
 
                 var imports = new JsonArray();
                 foreach (var imp in snapshot.Imports)

@@ -4,7 +4,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that 
 
 ## What It Does
 
-Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw MSBuild output, this server provides **17 structured tools** that use the official `Microsoft.Build` evaluation APIs. Agents get:
+Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw MSBuild output, this server provides **18 structured tools** that use the official `Microsoft.Build` evaluation APIs. Agents get:
 
 - **Correct project evaluation** — handles property inheritance, conditional PropertyGroups, Directory.Build.props, import chains, and NuGet-generated targets
 - **Dependency graph analysis** — project reference DAG with topological build order
@@ -80,6 +80,14 @@ When several Visual Studio installations are side by side (e.g. VS 2022 and VS 2
 
 Installations are discovered with `vswhere` (Visual Studio and Build Tools with the MSBuild component). When several match, stable installations are preferred over prerelease, then the newest version. The selector must match an installation reported by `vswhere`; otherwise the error lists the available installations. The selected installation provides both `VCTargetsPath` for C++ evaluation and `MSBuild.exe` + the `vcvarsall` environment for builds, and build status reports it as `visual_studio`. A `VCTargetsPath` already set in the server's environment is left as-is for evaluation.
 
+#### Per-call selection
+
+Different solutions may need different Visual Studio versions (e.g. a project whose `PlatformToolset` is only installed in VS 2022). `build` and the project-evaluation tools (`get_project_details`, `get_project_items`, `get_project_imports`, `find_project_for_file`, `get_dependency_graph`, `find_property`, `find_packages`, `diff_configurations`) accept an optional `vs` argument with the same selector syntax, overriding the server default for that call. `list_vs_installations` shows the selectable installations and the default.
+
+- **Builds** use the selected installation's `MSBuild.exe` and `vcvarsall` environment. Each installation's environment is captured once and reused. Requesting a different installation while a build is running is reported as a `collision` (with `running_visual_studio`/`requested_visual_studio`).
+- **Evaluation** applies the selected installation's `VCTargetsPath` as a toolset property for that evaluation only (overriding the server default and any `VCTargetsPath` environment variable), and caches results per installation.
+- Approval rules are not scoped by `vs`: approving builds for a solution covers any Visual Studio version.
+
 ## Tools
 
 ### Solution & Project Exploration
@@ -110,6 +118,7 @@ Installations are discovered with `vswhere` (Visual Studio and Build Tools with 
 | `search_build_output` | Regex search over a build's retained output with context lines |
 | `get_build_output` | View build output by line range, tail, or centered on a pattern match |
 | `save_build_output` | Write a build's output to a file on the host |
+| `list_vs_installations` | List Visual Studio installations selectable with `vs`, and the server default |
 
 ### Cross-Project Queries
 

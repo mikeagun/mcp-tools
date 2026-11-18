@@ -26,6 +26,7 @@ public static class DependencyTools
                     ["sln_path"] = new JsonObject { ["type"] = "string", ["description"] = "Path to .sln file" },
                     ["configuration"] = new JsonObject { ["type"] = "string", ["default"] = "Debug" },
                     ["platform"] = new JsonObject { ["type"] = "string", ["default"] = "x64" },
+                    ["vs"] = VsTools.VsArgSchema("C++ evaluation (VCTargetsPath)"),
                     ["format"] = new JsonObject
                     {
                         ["type"] = "string",
@@ -68,7 +69,7 @@ public static class DependencyTools
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                 var solution = slnEngine.Parse(slnPath);
-                var graph = DependencyGraph.Build(solution, projEngine, config, platform);
+                var graph = DependencyGraph.Build(solution, projEngine, config, platform, VsTools.GetVsArg(args));
 
                 // Apply include filter: expand to include all transitive dependencies
                 HashSet<string>? visibleNodes = null;

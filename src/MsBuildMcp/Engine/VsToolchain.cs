@@ -72,9 +72,11 @@ public sealed class VsToolchainProvider
     /// Get the build toolchain for a selector (or the server default). The vcvarsall environment is
     /// captured once per installation; a failed capture is not cached so it can be retried.
     /// </summary>
-    public VsToolchain GetToolchain(string? spec = null)
+    public VsToolchain GetToolchain(string? spec = null) => GetToolchain(ResolveInstance(spec));
+
+    /// <summary>Get (capturing on first use) the build toolchain for a resolved installation.</summary>
+    public VsToolchain GetToolchain(VsInstance instance)
     {
-        var instance = ResolveInstance(spec);
         var key = VsSelector.NormalizePath(instance.InstallationPath);
         var lazy = _toolchains.GetOrAdd(key, _ => new Lazy<VsToolchain>(() => _capture(instance)));
         try

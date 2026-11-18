@@ -16,8 +16,9 @@ public sealed class DependencyGraph
     /// Build graph from solution info + evaluated project references + .sln ProjectDependencies.
     /// </summary>
     public static DependencyGraph Build(SolutionInfo solution, ProjectEngine engine,
-        string configuration = "Debug", string platform = "x64")
+        string configuration = "Debug", string platform = "x64", string? vs = null)
     {
+        engine.ValidateVs(vs);
         var graph = new DependencyGraph();
         var projectPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var solutionDir = solution.Directory + Path.DirectorySeparatorChar;
@@ -36,7 +37,7 @@ public sealed class DependencyGraph
             var fullPath = Path.GetFullPath(Path.Combine(solution.Directory, proj.RelativePath));
             try
             {
-                var snapshot = engine.Evaluate(fullPath, configuration, platform, solutionDir);
+                var snapshot = engine.Evaluate(fullPath, configuration, platform, solutionDir, vs: vs);
                 foreach (var reference in snapshot.ProjectReferences)
                 {
                     var refName = projectPaths.GetValueOrDefault(reference.FullPath, reference.Name);
