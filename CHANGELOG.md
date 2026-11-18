@@ -64,3 +64,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MsBuildMcp** — `elapsed_ms` of a completed build is now its duration; previously it kept counting from the build's start time until the status was read.
 - **McpSharp** — The stdio transport decodes NDJSON input as UTF-8. Previously, non-ASCII text in requests (paths, elicitation answers, emoji) was corrupted.
 - **McpSharp** — Malformed input no longer stops the server. Unparseable JSON is answered with a `-32700` parse error, and invalid message shapes with a `-32600` invalid-request error. The transport then keeps serving. A leading UTF-8 BOM is ignored.
+- **McpSharp** — The stdio transport reads input in buffered chunks instead of one byte at a time. Reading a 1 MB request over a pipe took ~1.4 s and now takes a few milliseconds.

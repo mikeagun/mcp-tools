@@ -150,6 +150,7 @@ Tests are in `tests/McpSharp.Tests/`:
 - **JsonNode cloning**: `JsonNode.Parse(node.ToJsonString())` is used to clone nodes because `JsonNode` can only have one parent. This appears in `HandleToolsList` (schema cloning) and transport (id/result cloning).
 - **Content-Length is byte count**: The `Content-Length` header specifies bytes, not characters. Multi-byte UTF-8 content requires `Encoding.UTF8.GetBytes(body).Length`, not `body.Length`.
 - **WriteMessage framing**: When framing is `Unknown` (no messages read yet), `WriteMessage` defaults to Content-Length framing.
+- **The transport owns the input stream**: reads go through a 64 KB read-ahead buffer, because unbuffered stdin costs a system call per byte. Nothing else may read the input stream directly once the transport is constructed.
 
 ---
 

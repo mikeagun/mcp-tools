@@ -436,13 +436,13 @@ public sealed class McpTransport
     {
         bool first = true;
         int ch;
-        while ((ch = _input.ReadByte()) != -1)
+        while ((ch = ReadByteBuffered()) != -1)
         {
             if (first && ch == 0xEF)
             {
                 first = false;
-                int b1 = _input.ReadByte();
-                int b2 = b1 == 0xBB ? _input.ReadByte() : -1;
+                int b1 = ReadByteBuffered();
+                int b2 = b1 == 0xBB ? ReadByteBuffered() : -1;
                 if (b1 == 0xBB && b2 == 0xBF) continue;
 
                 var consumed = new List<byte> { 0xEF };
@@ -524,7 +524,7 @@ public sealed class McpTransport
         int read = 0;
         while (read < buf.Length)
         {
-            int n = _input.Read(buf, read, buf.Length - read);
+            int n = ReadBuffered(buf, read, buf.Length - read);
             if (n == 0) return ReadStatus.Eof;
             read += n;
         }
@@ -547,6 +547,45 @@ public sealed class McpTransport
         }
     }
 
+    // Read-ahead buffer over the input stream. Reading byte-at-a-time from an
+    // unbuffered stdin pipe costs a system call per byte, so all reads go
+    // through this buffer. Owned by the single reading thread.
+    private readonly byte[] _readBuffer = new byte[64 * 1024];
+    private int _readPos;
+    private int _readLen;
+
+    /// <summary>Refill the read-ahead buffer; false at end of stream.</summary>
+    private bool FillReadBuffer()
+    {
+        _readPos = 0;
+        _readLen = _input.Read(_readBuffer, 0, _readBuffer.Length);
+        return _readLen > 0;
+    }
+
+    private int ReadByteBuffered()
+    {
+        if (_readPos >= _readLen && !FillReadBuffer())
+            return -1;
+        return _readBuffer[_readPos++];
+    }
+
+    private int ReadBuffered(byte[] destination, int offset, int count)
+    {
+        if (_readPos >= _readLen)
+        {
+            // Large reads bypass the buffer once it is drained.
+            if (count >= _readBuffer.Length)
+                return _input.Read(destination, offset, count);
+            if (!FillReadBuffer())
+                return 0;
+        }
+
+        int n = Math.Min(count, _readLen - _readPos);
+        Buffer.BlockCopy(_readBuffer, _readPos, destination, offset, n);
+        _readPos += n;
+        return n;
+    }
+
     /// <summary>
     /// Read raw bytes up to (not including) the next <c>\n</c>, dropping a
     /// trailing <c>\r</c>. Bytes are decoded by the caller as UTF-8. Returns
@@ -554,24 +593,33 @@ public sealed class McpTransport
     /// </summary>
     private byte[]? ReadLineBytes(List<byte>? prefix)
     {
-        var buf = prefix ?? new List<byte>();
-        bool any = buf.Count > 0;
-        int ch;
-        while ((ch = _input.ReadByte()) != -1)
+        var line = new MemoryStream();
+        if (prefix != null)
+            line.Write(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(prefix));
+
+        while (true)
         {
-            if (ch == '\n')
-                return TrimCr(buf);
-            buf.Add((byte)ch);
-            any = true;
+            if (_readPos >= _readLen && !FillReadBuffer())
+                return line.Length > 0 ? TrimCr(line) : null;
+
+            var available = _readBuffer.AsSpan(_readPos, _readLen - _readPos);
+            int newline = available.IndexOf((byte)'\n');
+            if (newline >= 0)
+            {
+                line.Write(available[..newline]);
+                _readPos += newline + 1;
+                return TrimCr(line);
+            }
+
+            line.Write(available);
+            _readPos = _readLen;
         }
-        return any ? TrimCr(buf) : null;
     }
 
-    private static byte[] TrimCr(List<byte> buf)
+    private static byte[] TrimCr(MemoryStream line)
     {
-        if (buf.Count > 0 && buf[^1] == '\r')
-            buf.RemoveAt(buf.Count - 1);
-        return buf.ToArray();
+        var bytes = line.ToArray();
+        return bytes.Length > 0 && bytes[^1] == '\r' ? bytes[..^1] : bytes;
     }
     private readonly Lock _writeLock = new();
 
