@@ -73,9 +73,24 @@ public sealed class McpTransport
                         continue;
                     }
 
+                    if (status == ReadStatus.InvalidRequest)
+                    {
+                        WriteError(null, -32600, "Invalid Request: duplicate property");
+                        continue;
+                    }
+
                     if (status == ReadStatus.Skipped) continue;
 
-                    RouteMessage(msg);
+                    try
+                    {
+                        RouteMessage(msg);
+                    }
+                    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or FormatException)
+                    {
+                        // Unexpected message shape: answer it and keep reading.
+                        Log($"failed to route message: {ex.Message}");
+                        WriteError(null, -32600, "Invalid Request");
+                    }
                 }
             }
             catch (Exception ex)
@@ -128,6 +143,15 @@ public sealed class McpTransport
                 Log("ignoring message with a non-string method");
                 if (!isNotification)
                     WriteError(idNode, -32600, "Invalid Request: method must be a string");
+                return;
+            }
+
+            // MCP request params are always objects (or omitted).
+            if (obj["params"] is { } p && p is not JsonObject)
+            {
+                Log("ignoring message with non-object params");
+                if (!isNotification)
+                    WriteError(idNode, -32602, "Invalid params: params must be an object");
                 return;
             }
 
@@ -273,37 +297,36 @@ public sealed class McpTransport
     private void DispatchAndRespond(Func<string, JsonNode?, JsonNode?> handler,
         string method, JsonNode? parameters, bool isNotification, string? idJson)
     {
-        // Progress: if this is a tools/call with a progressToken, create a session
-        // that (a) emits a periodic keepalive to reset the client's timeout clock
-        // and (b) lets the handler emit meaningful status via McpProgress.Current.
-        // The MCP spec defines progressToken as string | integer.
-        JsonNode? progressTokenNode = null;
-        if (method == "tools/call")
-            progressTokenNode = parameters?["_meta"]?["progressToken"];
-
-        var progressSession = progressTokenNode != null
-            ? new ProgressSession(this, progressTokenNode)
-            : null;
-        McpProgress.SetCurrent(progressSession);
-
-        // For subscriptions/listen, inject the request ID into _meta so the
-        // handler can correlate it with the subscription without parsing the
-        // outer JSON-RPC envelope (which is already consumed at this point).
-        if (method == "subscriptions/listen" && idJson != null)
-        {
-            var paramsObj = parameters?.AsObject() ?? new JsonObject();
-            var meta = paramsObj["_meta"]?.AsObject();
-            if (meta == null)
-            {
-                meta = new JsonObject();
-                paramsObj["_meta"] = meta;
-            }
-            meta["__requestId"] = JsonNode.Parse(idJson);
-            parameters = paramsObj;
-        }
-
+        ProgressSession? progressSession = null;
         try
         {
+            // Progress: if this is a tools/call with a progressToken, create a session
+            // that (a) emits a periodic keepalive to reset the client's timeout clock
+            // and (b) lets the handler emit meaningful status via McpProgress.Current.
+            // The MCP spec defines progressToken as string | integer. A _meta that is
+            // not an object carries no progress token.
+            if (method == "tools/call"
+                && ((parameters as JsonObject)?["_meta"] as JsonObject)?["progressToken"] is { } progressToken)
+            {
+                progressSession = new ProgressSession(this, progressToken);
+            }
+            McpProgress.SetCurrent(progressSession);
+
+            // For subscriptions/listen, inject the request ID into _meta so the
+            // handler can correlate it with the subscription without parsing the
+            // outer JSON-RPC envelope (which is already consumed at this point).
+            if (method == "subscriptions/listen" && idJson != null)
+            {
+                var paramsObj = parameters as JsonObject ?? new JsonObject();
+                if (paramsObj["_meta"] is not JsonObject meta)
+                {
+                    meta = new JsonObject();
+                    paramsObj["_meta"] = meta;
+                }
+                meta["__requestId"] = JsonNode.Parse(idJson);
+                parameters = paramsObj;
+            }
+
             var result = handler(method, parameters);
 
             // Stop progress and drain any in-flight callback before sending the
@@ -388,7 +411,7 @@ public sealed class McpTransport
 
     // ── Stream reading (used by reader thread) ──────────────────
 
-    private enum ReadStatus { Message, ParseError, Skipped, Eof }
+    private enum ReadStatus { Message, ParseError, InvalidRequest, Skipped, Eof }
 
     /// <summary>
     /// Read the next parseable message directly from the input stream (blocking).
@@ -537,7 +560,6 @@ public sealed class McpTransport
         try
         {
             message = JsonNode.Parse(text);
-            return ReadStatus.Message;
         }
         catch (JsonException ex)
         {
@@ -545,8 +567,38 @@ public sealed class McpTransport
             Log($"parse error: {ex.Message}");
             return ReadStatus.ParseError;
         }
+
+        // JsonNode.Parse accepts duplicate property names, but JsonObject builds
+        // its dictionary lazily and throws on first access. Materialize the whole
+        // tree now so a duplicate is rejected here rather than wherever the
+        // message is first read.
+        try
+        {
+            Materialize(message);
+            return ReadStatus.Message;
+        }
+        catch (ArgumentException ex)
+        {
+            message = null;
+            Log($"invalid message: {ex.Message}");
+            return ReadStatus.InvalidRequest;
+        }
     }
 
+    private static void Materialize(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var property in obj)
+                    Materialize(property.Value);
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                    Materialize(item);
+                break;
+        }
+    }
     // Read-ahead buffer over the input stream. Reading byte-at-a-time from an
     // unbuffered stdin pipe costs a system call per byte, so all reads go
     // through this buffer. Owned by the single reading thread.

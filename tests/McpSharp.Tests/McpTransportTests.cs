@@ -476,6 +476,86 @@ public class McpTransportTests
         var response = Assert.Single(ParseNdjsonOutput(output));
         Assert.Equal(1, response["id"]!.GetValue<int>());
     }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NonObjectParams_GetsInvalidParamsAndKeepsServing(bool concurrent)
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":[]}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"subscriptions/listen\",\"params\":[]}",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":5}",
+            MakeJsonRpcRequest(3, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
+        WaitForOutputCount(output, 3, concurrent);
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(3, messages.Count);
+        Assert.Equal(-32602, ResponseFor(messages, 1)["error"]!["code"]!.GetValue<int>());
+        Assert.Equal(-32602, ResponseFor(messages, 2)["error"]!["code"]!.GetValue<int>());
+        Assert.NotNull(ResponseFor(messages, 3)["result"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NonObjectMeta_IsIgnoredAndKeepsServing(bool concurrent)
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"_meta\":7}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"subscriptions/listen\",\"params\":{\"_meta\":7}}",
+            MakeJsonRpcRequest(3, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
+        WaitForOutputCount(output, 3, concurrent);
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(3, messages.Count);
+        Assert.Equal("tools/call", ResponseFor(messages, 1)["result"]!["ok"]!.GetValue<string>());
+        Assert.Equal("subscriptions/listen", ResponseFor(messages, 2)["result"]!["ok"]!.GetValue<string>());
+        Assert.NotNull(ResponseFor(messages, 3)["result"]);
+    }
+
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"method\":\"y\"}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"a\",\"name\":\"b\"}}")]
+    public void DuplicateProperty_GetsInvalidRequestAndKeepsServing(string duplicate)
+    {
+        var input = MakeNdjsonInput(duplicate, MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(2, messages.Count);
+        Assert.Null(ErrorWithCode(messages, -32600)["id"]);
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    /// <summary>
+    /// With concurrent dispatch, Run() returns once the queue drains while
+    /// ThreadPool handlers may still be writing; wait for the expected output.
+    /// </summary>
+    private static void WaitForOutputCount(MemoryStream output, int count, bool concurrent)
+    {
+        if (!concurrent) return;
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (output)
+            {
+                var text = Encoding.UTF8.GetString(output.ToArray());
+                if (text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length >= count) return;
+            }
+            Thread.Sleep(20);
+        }
+    }
     // ── Integration: full round-trip with McpServer ──────────────
 
     [Fact]

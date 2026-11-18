@@ -110,6 +110,8 @@ The transport auto-detects Content-Length vs NDJSON framing from the first non-w
   - Unparseable JSON → `-32700` with `id: null`.
   - A non-object message (including batch arrays) → `-32600`.
   - A request with a non-string `method` or an invalid `id` type → `-32600`.
+  - A request whose `params` is not an object → `-32602`. A `_meta` that is not an object is ignored (no progress token).
+  - A duplicate property name anywhere in a message → `-32600` (the message is fully materialized after parsing).
   - Malformed notifications and responses that cannot be routed are logged to stderr and dropped.
   - A Content-Length header block without a valid length is skipped.
 
