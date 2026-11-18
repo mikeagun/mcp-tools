@@ -1,12 +1,124 @@
 // Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
+using System.Text.Json.Nodes;
 using MsBuildMcp.Engine;
 
 namespace MsBuildMcp.Tests;
 
 public class BuildRunnerTests
 {
+    /// <summary>
+    /// BuildManager whose "MSBuild.exe" is a batch file that runs for about a second and exits,
+    /// so build lifecycle tests need no Visual Studio. Disposes the manager and temp files.
+    /// </summary>
+    private sealed class FakeBuildManager : IDisposable
+    {
+        private readonly string _dir = Path.Combine(Path.GetTempPath(), $"fake-msbuild-{Guid.NewGuid():N}");
+        public BuildManager Manager { get; }
+        public string Solution { get; }
+
+        public FakeBuildManager()
+        {
+            Directory.CreateDirectory(_dir);
+            var fakeMsBuild = Path.Combine(_dir, "fake-msbuild.bat");
+            File.WriteAllText(fakeMsBuild, "@ping -n 2 127.0.0.1 > nul\r\n@exit /b 0\r\n");
+            Solution = Path.Combine(_dir, "x.sln");
+            var vswhere = new JsonArray(new JsonObject
+            {
+                ["installationPath"] = _dir,
+                ["installationVersion"] = "17.14.1.0",
+            }).ToJsonString();
+            Manager = new BuildManager(new VsToolchainProvider(
+                new VsLocator(() => vswhere, probeFileSystem: false), null,
+                i => new VsToolchain(i, fakeMsBuild, new())));
+        }
+
+        public BuildStatus Start() => Manager.StartOrPoll(Solution, null, "Debug", "x64",
+            restore: false, additionalArgs: null, timeoutSeconds: 0);
+
+        /// <summary>Wait for the running build to exit without polling it (HasRunningBuild doesn't archive).</summary>
+        public void WaitUntilIdle()
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (Manager.HasRunningBuild)
+            {
+                Assert.True(DateTime.UtcNow < deadline, "fake build did not finish");
+                Thread.Sleep(50);
+            }
+        }
+
+        public void Dispose()
+        {
+            Manager.Dispose();
+            try { Directory.Delete(_dir, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A build that finishes without being polled must still be queryable by build_id after the
+    /// next build replaces it. Previously the replaced build was disposed without being archived.
+    /// </summary>
+    [Fact]
+    public void ReplacedBuild_FinishedWithoutPolling_StaysQueryableById()
+    {
+        using var fake = new FakeBuildManager();
+
+        Assert.Equal("b-1", fake.Start().BuildId);
+        fake.WaitUntilIdle();
+        Assert.Equal("b-2", fake.Start().BuildId);
+
+        var first = fake.Manager.GetStatus("b-1", timeoutSeconds: 0, includeOutput: false, outputLines: 0);
+        Assert.NotNull(first);
+        Assert.True(first!.IsCompleted);
+        Assert.Equal("succeeded", first.Status);
+    }
+
+    /// <summary>
+    /// Polling a completed build repeatedly must not fill the recent-builds history with copies
+    /// of it and evict older builds.
+    /// </summary>
+    [Fact]
+    public void RepeatedPollsOfCompletedBuild_DoNotEvictOlderBuilds()
+    {
+        using var fake = new FakeBuildManager();
+
+        fake.Start();
+        fake.WaitUntilIdle();
+        for (var i = 0; i < 6; i++)
+            fake.Manager.GetStatus(null, 0, false, 0);
+
+        fake.Start();
+        fake.WaitUntilIdle();
+        for (var i = 0; i < 6; i++)
+            fake.Manager.GetStatus(null, 0, false, 0);
+
+        Assert.NotNull(fake.Manager.GetStatus("b-1", 0, false, 0));
+        Assert.NotNull(fake.Manager.GetStatus("b-2", 0, false, 0));
+    }
+
+    /// <summary>
+    /// elapsed_ms of a completed build is its duration: it must not keep growing while the
+    /// build sits completed, whether it's still the current build or archived after being replaced.
+    /// </summary>
+    [Fact]
+    public void CompletedBuild_ElapsedStopsAtCompletion()
+    {
+        using var fake = new FakeBuildManager();
+
+        fake.Start();
+        fake.WaitUntilIdle();
+        var first = fake.Manager.GetStatus("b-1", 0, false, 0)!;
+        Thread.Sleep(1500);
+        var again = fake.Manager.GetStatus("b-1", 0, false, 0)!;
+        Assert.Equal(first.ElapsedMs, again.ElapsedMs);
+
+        Thread.Sleep(1500);
+        fake.Start();   // replaces (and archives) b-1 well after it finished
+        var archived = fake.Manager.GetStatus("b-1", 0, false, 0)!;
+        Assert.Equal(first.ElapsedMs, archived.ElapsedMs);
+    }
+
     [Theory]
     [InlineData("Debug", "x64")]
     [InlineData("Release", "Any CPU")]
