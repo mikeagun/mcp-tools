@@ -56,6 +56,7 @@ public sealed class BuildJob : IDisposable
     private string? _lastCompletedProject;
     private int _lastReportedErrorCount;
     private bool _completed;
+    private DateTime? _endTime;
     private int? _exitCode;
 
     // Event fired on new error/warning or process exit
@@ -101,6 +102,7 @@ public sealed class BuildJob : IDisposable
             lock (_lock)
             {
                 _completed = true;
+                _endTime = DateTime.UtcNow;
                 _exitCode = _process.ExitCode;
             }
         }
@@ -109,6 +111,7 @@ public sealed class BuildJob : IDisposable
             lock (_lock)
             {
                 _completed = true;
+                _endTime = DateTime.UtcNow;
                 _exitCode = -1;
                 if (_errors.Count < MaxErrors)
                     _errors.Add(new BuildDiagnostic
@@ -221,7 +224,9 @@ public sealed class BuildJob : IDisposable
     {
         lock (_lock)
         {
-            var elapsed = (long)(DateTime.UtcNow - StartTime).TotalMilliseconds;
+            // Stop the clock when the build ends, so a completed build reports its duration
+            // rather than the time since it started.
+            var elapsed = (long)((_endTime ?? DateTime.UtcNow) - StartTime).TotalMilliseconds;
 
             string status;
             if (!_completed) status = "running";
@@ -335,7 +340,8 @@ public sealed class BuildManager : IDisposable
     private readonly VsToolchainProvider _vs;
 
     private BuildJob? _currentBuild;
-    private readonly Queue<BuildStatus> _recentBuilds = new(); // last 5 completed
+    private const int MaxRecentBuilds = 5;
+    private readonly Queue<BuildStatus> _recentBuilds = new(); // last MaxRecentBuilds completed, unique by BuildId
     private readonly object _lock = new();
     private int _buildCounter;
 
@@ -451,6 +457,7 @@ public sealed class BuildManager : IDisposable
 
             newJob = new BuildJob(psi, buildId, command, normalizedSln, targets, retention,
                 toolchain.Instance);
+            ArchiveIfCompletedLocked();
             _currentBuild?.Dispose();
             _currentBuild = newJob;
         }
@@ -586,13 +593,21 @@ public sealed class BuildManager : IDisposable
         lock (_lock) { ArchiveIfCompletedLocked(); }
     }
 
+    /// <summary>
+    /// Record the current build in the recent-builds history once it has completed. Idempotent:
+    /// a build is recorded at most once, however many times it is polled after completing.
+    /// Must also be called before replacing <c>_currentBuild</c>, so a build that finished
+    /// without being polled stays queryable by its build_id.
+    /// </summary>
     private void ArchiveIfCompletedLocked()
     {
-        if (_currentBuild != null && _currentBuild.IsCompleted)
-        {
-            _recentBuilds.Enqueue(_currentBuild.GetStatus());
-            while (_recentBuilds.Count > 5) _recentBuilds.Dequeue();
-        }
+        if (_currentBuild == null || !_currentBuild.IsCompleted)
+            return;
+        var buildId = _currentBuild.BuildId;
+        if (_recentBuilds.Any(b => b.BuildId == buildId))
+            return;
+        _recentBuilds.Enqueue(_currentBuild.GetStatus());
+        while (_recentBuilds.Count > MaxRecentBuilds) _recentBuilds.Dequeue();
     }
 
     /// <summary>
@@ -658,6 +673,7 @@ public sealed class BuildManager : IDisposable
             var command = $"dotnet {string.Join(" ", args)}";
 
             newJob = new BuildJob(psi, buildId, command, normalizedPath, "publish", retention);
+            ArchiveIfCompletedLocked();
             _currentBuild?.Dispose();
             _currentBuild = newJob;
         }
