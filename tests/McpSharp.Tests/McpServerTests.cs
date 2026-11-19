@@ -406,6 +406,50 @@ public class McpServerTests
         Assert.Equal(expected, ctx.ProgressToken);
     }
 
+    [Theory]
+    [InlineData("7")]
+    [InlineData("\"meta\"")]
+    [InlineData("[]")]
+    public void Dispatch_NonObjectMeta_IsIgnored(string metaJson)
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("allowed"));
+        RequestContext? captured = null;
+        server.ToolFilter = (tool, ctx) => { captured = ctx; return true; };
+
+        var list = server.Dispatch("tools/list", JsonNode.Parse($"{{\"_meta\":{metaJson}}}"))!;
+        Assert.Single(list["tools"]!.AsArray());
+        Assert.Same(RequestContext.Empty, captured);
+
+        var call = server.Dispatch("tools/call", JsonNode.Parse(
+            $"{{\"name\":\"allowed\",\"arguments\":{{\"input\":\"x\"}},\"_meta\":{metaJson}}}"))!;
+        Assert.Equal("complete", call["resultType"]!.GetValue<string>());
+        Assert.Same(RequestContext.Empty, captured);
+    }
+
+    [Theory]
+    // Wrong types for each field.
+    [InlineData("{\"io.modelcontextprotocol/protocolVersion\":5,\"io.modelcontextprotocol/clientInfo\":\"x\",\"io.modelcontextprotocol/clientCapabilities\":[],\"progressToken\":{\"a\":1}}")]
+    // Strings with an undecodable escape (lone surrogate).
+    [InlineData("{\"io.modelcontextprotocol/protocolVersion\":\"\\uD800\",\"progressToken\":\"\\uD800\"}")]
+    public void Dispatch_MalformedMetaFields_AreIgnored(string metaJson)
+    {
+        var server = CreateServer();
+        server.RegisterTool(CreateTool("allowed"));
+        RequestContext? captured = null;
+        server.ToolFilter = (tool, ctx) => { captured = ctx; return true; };
+
+        var list = server.Dispatch("tools/list", JsonNode.Parse($"{{\"_meta\":{metaJson}}}"))!;
+
+        Assert.Single(list["tools"]!.AsArray());
+        Assert.NotNull(captured);
+        Assert.Null(captured!.ProtocolVersion);
+        Assert.Null(captured.ClientInfo);
+        Assert.Null(captured.ClientCapabilities);
+        Assert.Null(captured.ProgressToken);
+        Assert.NotNull(captured.RawMeta);
+    }
+
     [Fact]
     public void ToolsCall_InvokesHandler()
     {

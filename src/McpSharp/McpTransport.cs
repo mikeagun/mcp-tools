@@ -75,7 +75,7 @@ public sealed class McpTransport
 
                     if (status == ReadStatus.InvalidRequest)
                     {
-                        WriteError(null, -32600, "Invalid Request: duplicate property");
+                        WriteError(null, -32600, "Invalid Request: duplicate or malformed property name");
                         continue;
                     }
 
@@ -134,13 +134,14 @@ public sealed class McpTransport
             var isNotification = idNode is null;
             if (!idValid)
             {
-                Log("ignoring request with an invalid id type");
+                // Never echo an id that cannot be decoded or serialized.
+                Log("ignoring request with an invalid id");
                 WriteError(null, -32600, "Invalid Request: id must be a string or number");
                 return;
             }
-            if (obj["method"] is not JsonValue methodValue || methodValue.GetValueKind() != JsonValueKind.String)
+            if (obj["method"] is not JsonValue methodValue || !TryGetString(methodValue, out _))
             {
-                Log("ignoring message with a non-string method");
+                Log("ignoring message with a missing or undecodable method");
                 if (!isNotification)
                     WriteError(idNode, -32600, "Invalid Request: method must be a string");
                 return;
@@ -182,10 +183,37 @@ public sealed class McpTransport
         WriteError(idValid ? idNode : null, -32600, "Invalid Request: missing method");
     }
 
-    /// <summary>JSON-RPC ids are strings or numbers; null/absent marks a notification.</summary>
+    /// <summary>
+    /// JSON-RPC ids are strings or numbers; null/absent marks a notification.
+    /// A string id must also decode (e.g. no lone surrogate escapes), since it
+    /// is echoed in the response.
+    /// </summary>
     private static bool IsValidId(JsonNode? id)
         => id is null
-            || (id is JsonValue v && v.GetValueKind() is JsonValueKind.String or JsonValueKind.Number);
+            || (id is JsonValue v
+                && (v.GetValueKind() == JsonValueKind.Number || TryGetString(v, out _)));
+
+    /// <summary>
+    /// Read a JSON string value. Returns false for non-strings and for strings
+    /// whose escapes do not decode (e.g. a lone surrogate), which
+    /// <see cref="JsonNode.Parse(string, JsonNodeOptions?, JsonDocumentOptions)"/>
+    /// accepts but decodes lazily.
+    /// </summary>
+    internal static bool TryGetString(JsonNode? node, out string? value)
+    {
+        value = null;
+        if (node is not JsonValue v || v.GetValueKind() != JsonValueKind.String)
+            return false;
+        try
+        {
+            value = v.GetValue<string>();
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>Routing key for a response id (string value, or the number's JSON text).</summary>
     private static string? IdKey(JsonNode? id) => id switch
@@ -568,17 +596,19 @@ public sealed class McpTransport
             return ReadStatus.ParseError;
         }
 
-        // JsonNode.Parse accepts duplicate property names, but JsonObject builds
-        // its dictionary lazily and throws on first access. Materialize the whole
-        // tree now so a duplicate is rejected here rather than wherever the
-        // message is first read.
+        // JsonNode.Parse accepts duplicate property names and undecodable escapes
+        // in property names, but JsonObject builds its dictionary lazily and throws
+        // on first access. Materialize the whole tree now so such a message is
+        // rejected here rather than wherever it is first read.
         try
         {
             Materialize(message);
             return ReadStatus.Message;
         }
-        catch (ArgumentException ex)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
+            // ArgumentException: duplicate property name.
+            // InvalidOperationException: undecodable property name (lone surrogate).
             message = null;
             Log($"invalid message: {ex.Message}");
             return ReadStatus.InvalidRequest;

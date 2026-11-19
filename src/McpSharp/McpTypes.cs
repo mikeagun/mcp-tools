@@ -72,20 +72,27 @@ public sealed class RequestContext
 
     /// <summary>
     /// Parse <c>_meta</c> from a request's params object. Returns <see cref="Empty"/>
-    /// if params or _meta is absent.
+    /// if params or _meta is absent or not an object. Fields of the wrong type,
+    /// or strings that do not decode, are treated as absent.
     /// </summary>
     public static RequestContext Parse(JsonNode? parameters)
     {
-        var meta = parameters?["_meta"]?.AsObject();
-        if (meta is null)
+        if ((parameters as JsonObject)?["_meta"] is not JsonObject meta)
             return Empty;
 
+        var progressToken = meta["progressToken"];
         return new RequestContext
         {
-            ProtocolVersion = meta["io.modelcontextprotocol/protocolVersion"]?.GetValue<string>(),
-            ClientInfo = meta["io.modelcontextprotocol/clientInfo"]?.AsObject(),
-            ClientCapabilities = meta["io.modelcontextprotocol/clientCapabilities"]?.AsObject(),
-            ProgressToken = meta["progressToken"]?.ToString(),
+            ProtocolVersion = McpTransport.TryGetString(meta["io.modelcontextprotocol/protocolVersion"], out var version)
+                ? version
+                : null,
+            ClientInfo = meta["io.modelcontextprotocol/clientInfo"] as JsonObject,
+            ClientCapabilities = meta["io.modelcontextprotocol/clientCapabilities"] as JsonObject,
+            ProgressToken = McpTransport.TryGetString(progressToken, out var token)
+                ? token
+                : progressToken is JsonValue v && v.GetValueKind() == System.Text.Json.JsonValueKind.Number
+                    ? v.ToJsonString()
+                    : null,
             RawMeta = meta,
         };
     }

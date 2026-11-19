@@ -486,13 +486,12 @@ public class McpTransportTests
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"subscriptions/listen\",\"params\":[]}",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":5}",
             MakeJsonRpcRequest(3, "tools/list"));
-        var output = new MemoryStream();
+        var output = new SynchronizedOutputStream();
         var transport = new McpTransport(input, output, "test");
 
         transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
-        WaitForOutputCount(output, 3, concurrent);
 
-        var messages = ParseNdjsonOutput(output);
+        var messages = CollectNdjson(output, 3, concurrent);
         Assert.Equal(3, messages.Count);
         Assert.Equal(-32602, ResponseFor(messages, 1)["error"]!["code"]!.GetValue<int>());
         Assert.Equal(-32602, ResponseFor(messages, 2)["error"]!["code"]!.GetValue<int>());
@@ -508,13 +507,12 @@ public class McpTransportTests
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"_meta\":7}}",
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"subscriptions/listen\",\"params\":{\"_meta\":7}}",
             MakeJsonRpcRequest(3, "tools/list"));
-        var output = new MemoryStream();
+        var output = new SynchronizedOutputStream();
         var transport = new McpTransport(input, output, "test");
 
         transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
-        WaitForOutputCount(output, 3, concurrent);
 
-        var messages = ParseNdjsonOutput(output);
+        var messages = CollectNdjson(output, 3, concurrent);
         Assert.Equal(3, messages.Count);
         Assert.Equal("tools/call", ResponseFor(messages, 1)["result"]!["ok"]!.GetValue<string>());
         Assert.Equal("subscriptions/listen", ResponseFor(messages, 2)["result"]!["ok"]!.GetValue<string>());
@@ -538,23 +536,79 @@ public class McpTransportTests
         Assert.NotNull(ResponseFor(messages, 2)["result"]);
     }
 
-    /// <summary>
-    /// With concurrent dispatch, Run() returns once the queue drains while
-    /// ThreadPool handlers may still be writing; wait for the expected output.
-    /// </summary>
-    private static void WaitForOutputCount(MemoryStream output, int count, bool concurrent)
+    // Inputs contain JSON escapes (\uD800) that JsonNode.Parse accepts but cannot
+    // decode to a string: a lone surrogate. Each case sits between two valid requests.
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"x\",\"\\uD800\":1}", true, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"x\",\"params\":{\"\\uD800\":1}}", true, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"\\uD800\"}", true, 5)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"\\uD800\"}", false, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"\\uD800\",\"method\":\"x\"}", true, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"\\uD800\",\"result\":{}}", false, null)]
+    public void LoneSurrogate_IsRejectedOrDroppedAndKeepsServing(string message, bool expectError, int? expectedId)
     {
-        if (!concurrent) return;
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
+        foreach (var concurrent in new[] { false, true })
         {
-            lock (output)
+            var input = MakeNdjsonInput(MakeJsonRpcRequest(1, "tools/list"), message, MakeJsonRpcRequest(2, "tools/list"));
+            var output = new SynchronizedOutputStream();
+            var transport = new McpTransport(input, output, "test");
+
+            transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
+
+            var messages = CollectNdjson(output, expectError ? 3 : 2, concurrent);
+            Assert.Equal(expectError ? 3 : 2, messages.Count);
+            Assert.NotNull(ResponseFor(messages, 1)["result"]);
+            Assert.NotNull(ResponseFor(messages, 2)["result"]);
+            if (expectError)
             {
-                var text = Encoding.UTF8.GetString(output.ToArray());
-                if (text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length >= count) return;
+                var error = ErrorWithCode(messages, -32600);
+                if (expectedId is null)
+                    Assert.Null(error["id"]);
+                else
+                    Assert.Equal(expectedId, error["id"]!.GetValue<int>());
             }
-            Thread.Sleep(20);
         }
+    }
+
+    /// <summary>
+    /// Output stream whose writes and snapshots share a lock, so a test can read
+    /// output while concurrent handlers are still writing.
+    /// </summary>
+    private sealed class SynchronizedOutputStream : MemoryStream
+    {
+        private readonly object _gate = new();
+        public override void Write(byte[] buffer, int offset, int count) { lock (_gate) base.Write(buffer, offset, count); }
+        public override void Write(ReadOnlySpan<byte> buffer) { lock (_gate) base.Write(buffer); }
+        public override void WriteByte(byte value) { lock (_gate) base.WriteByte(value); }
+        public override void Flush() { lock (_gate) base.Flush(); }
+        public byte[] Snapshot() { lock (_gate) return ToArray(); }
+    }
+
+    /// <summary>
+    /// Parse the newline-terminated messages written so far. With concurrent
+    /// dispatch, Run() returns once the queue drains while ThreadPool handlers
+    /// may still be writing, so wait for the expected number of terminators and
+    /// then a short settle period to catch any unexpected extra output.
+    /// </summary>
+    private static List<JsonNode> CollectNdjson(SynchronizedOutputStream output, int expected, bool concurrent)
+    {
+        List<JsonNode> Parse()
+        {
+            var bytes = output.Snapshot();
+            var end = Array.LastIndexOf(bytes, (byte)'\n') + 1;
+            return Encoding.UTF8.GetString(bytes, 0, end)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonNode.Parse(line)!)
+                .ToList();
+        }
+
+        if (!concurrent) return Parse();
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (Parse().Count < expected && DateTime.UtcNow < deadline)
+            Thread.Sleep(20);
+        Thread.Sleep(100);
+        return Parse();
     }
     // ── Integration: full round-trip with McpServer ──────────────
 
