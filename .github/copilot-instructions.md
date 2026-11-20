@@ -106,7 +106,7 @@ The transport auto-detects Content-Length vs NDJSON framing from the first non-w
 - Requests with `id` get responses; notifications (no `id`) do not
 - Unknown methods throw `InvalidOperationException` → JSON-RPC error code -32603
 - `notifications/initialized` and `notifications/cancelled` are silently accepted
-- Bad input never stops the reader thread:
+- Malformed JSON-RPC messages do not stop the reader thread:
   - Unparseable JSON → `-32700` with `id: null`.
   - A non-object message (including batch arrays) → `-32600`.
   - A request with a non-string `method` or an invalid `id` type → `-32600`.
@@ -154,6 +154,7 @@ Tests are in `tests/McpSharp.Tests/`:
 - **Content-Length is byte count**: The `Content-Length` header specifies bytes, not characters. Multi-byte UTF-8 content requires `Encoding.UTF8.GetBytes(body).Length`, not `body.Length`.
 - **WriteMessage framing**: When framing is `Unknown` (no messages read yet), `WriteMessage` defaults to Content-Length framing.
 - **The transport owns the input stream**: reads go through a 64 KB read-ahead buffer, because unbuffered stdin costs a system call per byte. Nothing else may read the input stream directly once the transport is constructed.
+- **The reader writes errors synchronously**: error responses to malformed messages, and their stderr diagnostics, are written on the reader thread. A client that keeps writing without reading stdout and stderr can stall the reader once the pipes fill; standard MCP clients read both concurrently. The body buffer is sized from the `Content-Length` header, so an enormous length (near `int.MaxValue`) still ends the reader.
 
 ---
 
