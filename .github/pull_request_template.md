@@ -21,4 +21,4 @@ Why is this change needed? Link to issue if applicable.
 - [ ] Code follows existing patterns
 - [ ] No new warnings from `dotnet build`
 - [ ] README updated (if adding tools or changing behavior)
-- [ ] CHANGELOG updated
+- [ ] Component CHANGELOG updated (`src/<Component>/CHANGELOG.md`)

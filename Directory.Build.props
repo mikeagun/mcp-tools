@@ -1,0 +1,15 @@
+<Project>
+
+  <!-- Shared package metadata. Each project sets its own <Version>: the servers are versioned and
+       released independently. Projects are not packable unless they opt in (the servers pack as
+       .NET tools; see their project files). -->
+  <PropertyGroup>
+    <Authors>mcp-tools contributors</Authors>
+    <PackageProjectUrl>https://github.com/mikeagun/mcp-tools</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/mikeagun/mcp-tools</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>

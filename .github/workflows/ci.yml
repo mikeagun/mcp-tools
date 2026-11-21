@@ -33,6 +33,17 @@ jobs:
       - name: Test
         run: dotnet test --no-build -c ${{ matrix.configuration }} --verbosity normal --logger "trx;LogFileName=test-results.trx"
 
+      - name: Pack and smoke test tool packages (win-x64)
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $servers = @(./scripts/Get-ReleaseInfo.ps1)
+          foreach ($server in $servers) {
+            dotnet pack $server.Project -c Release -o artifacts/packages
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          ./scripts/Test-ToolPackage.ps1 -PackageDirectory artifacts/packages -RuntimeIdentifier win-x64 -PackageId $servers.PackageId
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -41,7 +52,8 @@ jobs:
           path: '**/test-results.trx'
 
   # Runs the suite on an ARM64 host. The MsBuildMcp tests that start real builds use the native
-  # ARM64 Visual Studio tools there (MSBuild.exe and the vcvarsall environment).
+  # ARM64 Visual Studio tools there (MSBuild.exe and the vcvarsall environment), and the win-arm64
+  # tool packages are smoke-tested natively.
   build-and-test-arm64:
     runs-on: windows-11-arm
 
@@ -61,6 +73,16 @@ jobs:
 
       - name: Test
         run: dotnet test --no-build -c Release --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+      - name: Pack and smoke test tool packages (win-arm64)
+        shell: pwsh
+        run: |
+          $servers = @(./scripts/Get-ReleaseInfo.ps1)
+          foreach ($server in $servers) {
+            dotnet pack $server.Project -c Release -o artifacts/packages
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          ./scripts/Test-ToolPackage.ps1 -PackageDirectory artifacts/packages -RuntimeIdentifier win-arm64 -PackageId $servers.PackageId
 
       - name: Upload test results
         if: always()

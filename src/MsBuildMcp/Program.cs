@@ -25,7 +25,7 @@ public static class Program
         var solutionEngine = new SolutionEngine();
         var projectEngine = new ProjectEngine(vs);
         var buildManager = new BuildManager(vs);
-        var server = new McpServer("msbuild-mcp");
+        var server = new McpServer("msbuild-mcp", McpServer.VersionOf(typeof(Program).Assembly));
 
         // Register tools, resources, prompts
         ToolRegistration.RegisterAll(server, solutionEngine, projectEngine, buildManager);

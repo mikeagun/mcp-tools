@@ -26,10 +26,17 @@ This repository contains a shared MCP protocol library and four MCP servers for 
 | Publish CiDebugMcp | `dotnet publish src/CiDebugMcp -c Release -o publish/ci-debug-mcp` |
 | Publish MsBuildMcp | `dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp` |
 | Publish ElicitMcp | `dotnet publish src/ElicitMcp -c Release -o publish/elicit-mcp` |
+| Pack a server as a .NET tool | `dotnet pack src/HyperVMcp -c Release -o artifacts/packages` |
+| Smoke-test packed servers | `./scripts/Test-ToolPackage.ps1 -PackageDirectory artifacts/packages` |
+| List servers/versions, validate a release tag | `./scripts/Get-ReleaseInfo.ps1` / `./scripts/Get-ReleaseInfo.ps1 -Tag msbuild-mcp-v0.2.0` |
 
 ## Dependency Structure
 
 All four servers depend on McpSharp via direct project references (`src/McpSharp/McpSharp.csproj`). Changes to McpSharp affect all servers — run the full test suite after any McpSharp change.
+
+## Versioning and Changelogs
+
+The servers are versioned and released independently: each server's `<Version>` is in its own project file and its changes go in `src/<Server>/CHANGELOG.md` (root `CHANGELOG.md` is only an index). Record McpSharp changes in `src/McpSharp/CHANGELOG.md`, and also in the changelog of each server whose behavior they change. A release is a pull request that bumps `<Version>` and turns `## [Unreleased]` into `## [<version>] - <date>`, followed by a `<server>-v<version>` tag (see the README's "Versioning and releases").
 
 ---
 
@@ -427,7 +434,7 @@ The build subprocess must strip `MSBUILD_EXE_PATH`, `MSBuildSDKsPath`, `MSBuildE
 3. Wire it into `ToolRegistration.RegisterAll()` if it's a new class
 4. Update the `ExactToolSet` test assertion in `FeatureTests.cs` — this test verifies that every registered tool name is known, preventing accidental tool renames or removals
 5. Add unit tests for the underlying logic and integration tests for MCP dispatch
-6. Update `src/MsBuildMcp/README.md` tool reference table and `CHANGELOG.md`
+6. Update `src/MsBuildMcp/README.md` tool reference table and `src/MsBuildMcp/CHANGELOG.md`
 
 Exceptions thrown by tool handlers are caught by McpServer and returned as MCP error responses with `isError: true`.
 

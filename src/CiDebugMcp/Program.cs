@@ -38,7 +38,7 @@ public static class Program
         var binaryAnalyzer = new BinaryAnalyzer();
         var downloadManager = new DownloadManager(github);
         var resolver = new CiProviderResolver(github, cache);
-        var server = new McpServer("ci-debug-mcp");
+        var server = new McpServer("ci-debug-mcp", McpServer.VersionOf(typeof(Program).Assembly));
 
         // Register tools with provider resolver for GitHub + ADO support
         ToolRegistration.RegisterAll(server, github, binaryAnalyzer, downloadManager, resolver);
