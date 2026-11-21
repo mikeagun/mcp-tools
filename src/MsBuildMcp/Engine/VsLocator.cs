@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -22,7 +23,7 @@ public sealed record VsInstance
     public int? ProductYear { get; init; }
     public bool IsPrerelease { get; init; }
 
-    /// <summary>VS MSBuild.exe (amd64 preferred). Null if not found on disk.</summary>
+    /// <summary>VS MSBuild.exe (host-native build preferred). Null if not found on disk.</summary>
     public string? MsBuildPath { get; init; }
 
     /// <summary>Highest complete <c>MSBuild\Microsoft\VC\vNNN\</c> directory (trailing slash). Null if no C++ targets are installed.</summary>
@@ -282,9 +283,24 @@ public sealed class VsLocator
         return m.Success ? int.Parse(m.Groups[1].Value) : null;
     }
 
-    internal static string? FindMsBuildExe(string installPath)
+    /// <summary>
+    /// Host OS architecture used to pick native tools. Uses the OS (not process) architecture so an
+    /// x64 server running under emulation on an ARM64 host still prefers the native ARM64 tools.
+    /// </summary>
+    internal static Architecture HostArchitecture => RuntimeInformation.OSArchitecture;
+
+    internal static string? FindMsBuildExe(string installPath) => FindMsBuildExe(installPath, HostArchitecture);
+
+    /// <summary>
+    /// Find VS MSBuild.exe, preferring the host-native build: <c>Bin\arm64</c> then <c>Bin\amd64</c> on
+    /// ARM64 hosts, <c>Bin\amd64</c> elsewhere, falling back to the x86 <c>Bin\MSBuild.exe</c>.
+    /// </summary>
+    internal static string? FindMsBuildExe(string installPath, Architecture hostArch)
     {
-        foreach (var rel in new[] { @"MSBuild\Current\Bin\amd64\MSBuild.exe", @"MSBuild\Current\Bin\MSBuild.exe" })
+        string[] candidates = hostArch == Architecture.Arm64
+            ? [@"MSBuild\Current\Bin\arm64\MSBuild.exe", @"MSBuild\Current\Bin\amd64\MSBuild.exe", @"MSBuild\Current\Bin\MSBuild.exe"]
+            : [@"MSBuild\Current\Bin\amd64\MSBuild.exe", @"MSBuild\Current\Bin\MSBuild.exe"];
+        foreach (var rel in candidates)
         {
             var p = Path.Combine(installPath, rel);
             if (File.Exists(p)) return p;

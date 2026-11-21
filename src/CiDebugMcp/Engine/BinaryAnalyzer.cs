@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 
 namespace CiDebugMcp.Engine;
@@ -72,21 +73,33 @@ public sealed partial class BinaryAnalyzer
         return (missing.Length == 0 && extra.Length == 0, missing, extra);
     }
 
+    /// <summary>
+    /// dumpbin.exe locations relative to an MSVC tools directory (<c>VC\Tools\MSVC\&lt;version&gt;</c>), in
+    /// preference order: the host-native tools on ARM64 hosts, then the x64 tools.
+    /// </summary>
+    internal static string[] DumpbinRelativePaths(Architecture hostArch) =>
+        hostArch == Architecture.Arm64
+            ? [Path.Combine("bin", "HostARM64", "arm64", "dumpbin.exe"), Path.Combine("bin", "Hostx64", "x64", "dumpbin.exe")]
+            : [Path.Combine("bin", "Hostx64", "x64", "dumpbin.exe")];
+
+    /// <summary>First existing dumpbin.exe under an MSVC tools directory for the host architecture, or null.</summary>
+    internal static string? FindDumpbinInToolsDir(string toolsDir, Architecture hostArch) =>
+        DumpbinRelativePaths(hostArch)
+            .Select(rel => Path.Combine(toolsDir, rel))
+            .FirstOrDefault(File.Exists);
+
     private static string? FindDumpbin(string? vsToolsPath)
     {
-        if (vsToolsPath != null)
-        {
-            var path = Path.Combine(vsToolsPath, "bin", "Hostx64", "x64", "dumpbin.exe");
-            if (File.Exists(path)) return path;
-        }
+        // OS (not process) architecture: an x64 server emulated on an ARM64 host still prefers native tools.
+        var hostArch = RuntimeInformation.OSArchitecture;
+
+        if (vsToolsPath != null && FindDumpbinInToolsDir(vsToolsPath, hostArch) is { } explicitPath)
+            return explicitPath;
 
         // Try VS_TOOLS_PATH env
         var envPath = Environment.GetEnvironmentVariable("VS_TOOLS_PATH");
-        if (envPath != null)
-        {
-            var path = Path.Combine(envPath, "bin", "Hostx64", "x64", "dumpbin.exe");
-            if (File.Exists(path)) return path;
-        }
+        if (envPath != null && FindDumpbinInToolsDir(envPath, hostArch) is { } envDumpbin)
+            return envDumpbin;
 
         // Try vswhere
         var vswhere = Path.Combine(
@@ -114,11 +127,8 @@ public sealed partial class BinaryAnalyzer
                     var latest = Directory.GetDirectories(toolsDir)
                         .OrderByDescending(d => d)
                         .FirstOrDefault();
-                    if (latest != null)
-                    {
-                        var path = Path.Combine(latest, "bin", "Hostx64", "x64", "dumpbin.exe");
-                        if (File.Exists(path)) return path;
-                    }
+                    if (latest != null && FindDumpbinInToolsDir(latest, hostArch) is { } vsDumpbin)
+                        return vsDumpbin;
                 }
             }
         }

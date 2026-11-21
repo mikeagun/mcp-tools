@@ -30,6 +30,8 @@ dotnet test
 | `analyze_binary_deps` | DLL dependency analysis via dumpbin, optional baseline comparison. |
 | `update_binary_baselines` | Regenerate dependency baseline files from build output. Auto-discovers mappings from `scripts_dir`. |
 
+The binary tools need `dumpbin.exe` from the MSVC build tools. The server looks in the MSVC tools directory set by `VS_TOOLS_PATH` (`VC\Tools\MSVC\<version>`), then in the newest MSVC toolset of the latest Visual Studio installation. On ARM64 hosts it prefers the native `bin\HostARM64\arm64` tools and falls back to `bin\Hostx64\x64`. On x64 hosts it uses `bin\Hostx64\x64`.
+
 ## Quick Start
 
 ```bash
