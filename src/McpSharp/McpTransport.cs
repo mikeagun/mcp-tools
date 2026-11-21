@@ -64,26 +64,38 @@ public sealed class McpTransport
             {
                 while (true)
                 {
-                    var msg = ReadMessage();
-                    if (msg == null) break;
+                    var status = ReadNext(out var msg);
+                    if (status == ReadStatus.Eof) break;
 
-                    if (IsResponse(msg))
+                    if (status == ReadStatus.ParseError)
                     {
-                        var id = msg["id"]?.GetValue<string>();
-                        if (id != null)
-                        {
-                            lock (_responseRoutingLock)
-                            {
-                                if (_responseWaiters.TryRemove(id, out var tcs))
-                                    tcs.TrySetResult(msg);
-                                else
-                                    _earlyResponses[id] = msg;
-                            }
-                        }
+                        WriteError(null, -32700, "Parse error");
+                        continue;
                     }
-                    else
+
+                    if (status == ReadStatus.InvalidRequest)
                     {
-                        _requestQueue.Add(msg);
+                        WriteError(null, -32600, "Invalid Request: duplicate or malformed property name");
+                        continue;
+                    }
+
+                    if (status == ReadStatus.InvalidContent)
+                    {
+                        RejectInvalidContent((JsonObject)msg!);
+                        continue;
+                    }
+
+                    if (status == ReadStatus.Skipped) continue;
+
+                    try
+                    {
+                        RouteMessage(msg);
+                    }
+                    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or FormatException)
+                    {
+                        // Unexpected message shape: answer it and keep reading.
+                        Log($"failed to route message: {ex.Message}");
+                        WriteError(null, -32600, "Invalid Request");
                     }
                 }
             }
@@ -106,14 +118,182 @@ public sealed class McpTransport
     }
 
     /// <summary>
-    /// Classify a message as a response (has "result" or "error", no "method").
+    /// Validate an inbound message's JSON-RPC shape and route it: requests and
+    /// notifications go to the request queue, responses go to a waiting
+    /// server-initiated request. Invalid requests get a <c>-32600</c> error;
+    /// malformed notifications and unroutable responses are logged and dropped.
     /// </summary>
-    private static bool IsResponse(JsonNode msg)
+    private void RouteMessage(JsonNode? msg)
     {
-        var obj = msg.AsObject();
-        return !obj.ContainsKey("method")
-            && (obj.ContainsKey("result") || obj.ContainsKey("error"));
+        if (msg is not JsonObject obj)
+        {
+            Log("ignoring message that is not a JSON object");
+            WriteError(null, -32600, "Invalid Request: expected a JSON object");
+            return;
+        }
+
+        var idNode = obj["id"];
+        var idValid = IsValidId(idNode);
+
+        if (obj.ContainsKey("method"))
+        {
+            var isNotification = idNode is null;
+            if (!idValid)
+            {
+                // Never echo an id that cannot be decoded or serialized.
+                Log("ignoring request with an invalid id");
+                WriteError(null, -32600, "Invalid Request: id must be a string or number");
+                return;
+            }
+            if (obj["method"] is not JsonValue methodValue || !TryGetString(methodValue, out _))
+            {
+                // Without a valid method the message is not a notification, so it
+                // is answered even without an id (the id is null in that case).
+                Log("rejecting message with a missing or undecodable method");
+                WriteError(idNode, -32600, "Invalid Request: method must be a string");
+                return;
+            }
+
+            // MCP request params are always objects (or omitted).
+            if (obj["params"] is { } p && p is not JsonObject)
+            {
+                Log("ignoring message with non-object params");
+                if (!isNotification)
+                    WriteError(idNode, -32602, "Invalid params: params must be an object");
+                return;
+            }
+
+            _requestQueue.Add(obj);
+            return;
+        }
+
+        if (obj.ContainsKey("result") || obj.ContainsKey("error"))
+        {
+            var key = idValid ? IdKey(idNode) : null;
+            if (key == null)
+            {
+                Log("ignoring response without a usable id");
+                return;
+            }
+
+            lock (_responseRoutingLock)
+            {
+                if (_responseWaiters.TryRemove(key, out var tcs))
+                    tcs.TrySetResult(obj);
+                else
+                    _earlyResponses[key] = obj;
+            }
+            return;
+        }
+
+        Log("ignoring message that is neither a request nor a response");
+        WriteError(idValid ? idNode : null, -32600, "Invalid Request: missing method");
     }
+
+    /// <summary>
+    /// Handle a message whose top-level members are readable but which has a
+    /// duplicate or undecodable property name further down. It is never
+    /// dispatched; it is classified by its top-level members instead:
+    /// a request gets <c>-32600</c> (echoing a valid id), a notification is
+    /// dropped, and a response completes its pending server-initiated request
+    /// with an error rather than being answered.
+    /// </summary>
+    private void RejectInvalidContent(JsonObject obj)
+    {
+        const string message = "Invalid Request: duplicate or malformed property name";
+        var idNode = obj["id"];
+        var idValid = IsValidId(idNode);
+
+        if (obj.ContainsKey("method"))
+        {
+            var validNotification = idNode is null
+                && obj["method"] is JsonValue methodValue && TryGetString(methodValue, out _);
+            if (validNotification)
+            {
+                Log("dropping notification with a duplicate or malformed property name");
+                return;
+            }
+            WriteError(idValid ? idNode : null, -32600, message);
+            return;
+        }
+
+        if (obj.ContainsKey("result") || obj.ContainsKey("error"))
+        {
+            var key = idValid ? IdKey(idNode) : null;
+            Log("response has a duplicate or malformed property name");
+            if (key == null)
+                return;
+
+            var error = new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = idNode!.DeepClone(),
+                ["error"] = new JsonObject { ["code"] = -32600, ["message"] = message },
+            };
+            lock (_responseRoutingLock)
+            {
+                if (_responseWaiters.TryRemove(key, out var tcs))
+                    tcs.TrySetResult(error);
+                else
+                    _earlyResponses[key] = error;
+            }
+            return;
+        }
+
+        WriteError(idValid ? idNode : null, -32600, message);
+    }
+
+    /// <summary>
+    /// JSON-RPC ids are strings or numbers; null/absent marks a notification.
+    /// A string id must also decode (e.g. no lone surrogate escapes), since it
+    /// is echoed in the response.
+    /// </summary>
+    private static bool IsValidId(JsonNode? id)
+        => id is null
+            || (id is JsonValue v
+                && (v.GetValueKind() == JsonValueKind.Number || TryGetString(v, out _)));
+
+    /// <summary>
+    /// Read a JSON string value. Returns false for non-strings and for strings
+    /// whose escapes do not decode (e.g. a lone surrogate), which
+    /// <see cref="JsonNode.Parse(string, JsonNodeOptions?, JsonDocumentOptions)"/>
+    /// accepts but decodes lazily.
+    /// </summary>
+    internal static bool TryGetString(JsonNode? node, out string? value)
+    {
+        value = null;
+        if (node is not JsonValue v || v.GetValueKind() != JsonValueKind.String)
+            return false;
+        try
+        {
+            value = v.GetValue<string>();
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Routing key for a response id (string value, or the number's JSON text).</summary>
+    private static string? IdKey(JsonNode? id) => id switch
+    {
+        JsonValue v when v.GetValueKind() == JsonValueKind.String => v.GetValue<string>(),
+        JsonValue v when v.GetValueKind() == JsonValueKind.Number => v.ToJsonString(),
+        _ => null,
+    };
+
+    private void WriteError(JsonNode? id, int code, string message)
+    {
+        WriteMessage(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id?.DeepClone(),
+            ["error"] = new JsonObject { ["code"] = code, ["message"] = message },
+        });
+    }
+
+    private void Log(string message) => Console.Error.WriteLine($"{_logPrefix}: {message}");
 
     // ── Response waiters (used by Elicit()) ─────────────────────
 
@@ -205,37 +385,36 @@ public sealed class McpTransport
     private void DispatchAndRespond(Func<string, JsonNode?, JsonNode?> handler,
         string method, JsonNode? parameters, bool isNotification, string? idJson)
     {
-        // Progress: if this is a tools/call with a progressToken, create a session
-        // that (a) emits a periodic keepalive to reset the client's timeout clock
-        // and (b) lets the handler emit meaningful status via McpProgress.Current.
-        // The MCP spec defines progressToken as string | integer.
-        JsonNode? progressTokenNode = null;
-        if (method == "tools/call")
-            progressTokenNode = parameters?["_meta"]?["progressToken"];
-
-        var progressSession = progressTokenNode != null
-            ? new ProgressSession(this, progressTokenNode)
-            : null;
-        McpProgress.SetCurrent(progressSession);
-
-        // For subscriptions/listen, inject the request ID into _meta so the
-        // handler can correlate it with the subscription without parsing the
-        // outer JSON-RPC envelope (which is already consumed at this point).
-        if (method == "subscriptions/listen" && idJson != null)
-        {
-            var paramsObj = parameters?.AsObject() ?? new JsonObject();
-            var meta = paramsObj["_meta"]?.AsObject();
-            if (meta == null)
-            {
-                meta = new JsonObject();
-                paramsObj["_meta"] = meta;
-            }
-            meta["__requestId"] = JsonNode.Parse(idJson);
-            parameters = paramsObj;
-        }
-
+        ProgressSession? progressSession = null;
         try
         {
+            // Progress: if this is a tools/call with a progressToken, create a session
+            // that (a) emits a periodic keepalive to reset the client's timeout clock
+            // and (b) lets the handler emit meaningful status via McpProgress.Current.
+            // The MCP spec defines progressToken as string | integer. A _meta that is
+            // not an object carries no progress token.
+            if (method == "tools/call"
+                && ((parameters as JsonObject)?["_meta"] as JsonObject)?["progressToken"] is { } progressToken)
+            {
+                progressSession = new ProgressSession(this, progressToken);
+            }
+            McpProgress.SetCurrent(progressSession);
+
+            // For subscriptions/listen, inject the request ID into _meta so the
+            // handler can correlate it with the subscription without parsing the
+            // outer JSON-RPC envelope (which is already consumed at this point).
+            if (method == "subscriptions/listen" && idJson != null)
+            {
+                var paramsObj = parameters as JsonObject ?? new JsonObject();
+                if (paramsObj["_meta"] is not JsonObject meta)
+                {
+                    meta = new JsonObject();
+                    paramsObj["_meta"] = meta;
+                }
+                meta["__requestId"] = JsonNode.Parse(idJson);
+                parameters = paramsObj;
+            }
+
             var result = handler(method, parameters);
 
             // Stop progress and drain any in-flight callback before sending the
@@ -320,127 +499,293 @@ public sealed class McpTransport
 
     // ── Stream reading (used by reader thread) ──────────────────
 
+    // InvalidRequest: the message cannot be classified (unreadable top-level members).
+    // InvalidContent: top-level members are readable, but a nested property name
+    // is duplicated or undecodable; the message is returned for classification.
+    private enum ReadStatus { Message, ParseError, InvalidRequest, InvalidContent, Skipped, Eof }
+
     /// <summary>
-    /// Read a single message directly from the input stream (blocking).
-    /// In production, the reader thread calls this. Tests may call it directly.
+    /// Read the next parseable message directly from the input stream (blocking).
+    /// Unparseable or unframeable input is logged and skipped; returns null only
+    /// at end of stream. In production the reader thread reads the stream (and
+    /// additionally answers unparseable input with a <c>-32700</c> error).
+    /// Tests may call this directly, e.g. to prime framing detection.
     /// </summary>
     public JsonNode? ReadMessage()
     {
-        if (_framing == Framing.Unknown)
+        while (true)
         {
-            int ch;
-            while ((ch = _input.ReadByte()) != -1)
-            {
-                if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue;
-                if (ch == '{')
-                {
-                    _framing = Framing.Ndjson;
-                    Console.Error.WriteLine($"{_logPrefix}: using NDJSON framing");
-                    var sb = new StringBuilder();
-                    sb.Append((char)ch);
-                    int c;
-                    while ((c = _input.ReadByte()) != -1 && c != '\n')
-                    {
-                        sb.Append((char)c);
-                    }
-                    var line = sb.ToString().TrimEnd('\r');
-                    try { return JsonNode.Parse(line); }
-                    catch { return null; }
-                }
-                else
-                {
-                    _framing = Framing.ContentLength;
-                    Console.Error.WriteLine($"{_logPrefix}: using Content-Length framing");
-                    var sb = new StringBuilder();
-                    sb.Append((char)ch);
-                    return ReadContentLength(sb);
-                }
-            }
-            return null;
+            var status = ReadNext(out var msg);
+            if (status == ReadStatus.Eof) return null;
+            if (status == ReadStatus.Message && msg != null) return msg;
         }
-
-        return _framing == Framing.Ndjson ? ReadNdjson() : ReadContentLength(null);
     }
 
-    private JsonNode? ReadContentLength(StringBuilder? prefixBuilder)
+    /// <summary>
+    /// Read one framed unit from the stream. Framing is auto-detected from the
+    /// first non-whitespace byte (after an optional UTF-8 BOM): <c>{</c> or
+    /// <c>[</c> selects NDJSON, anything else selects Content-Length headers.
+    /// </summary>
+    private ReadStatus ReadNext(out JsonNode? message)
     {
-        int contentLength = 0;
-        bool found = false;
+        message = null;
+        List<byte>? prefix = null;
 
-        string? firstLine;
-        if (prefixBuilder != null)
+        if (_framing == Framing.Unknown)
         {
-            int c;
-            while ((c = _input.ReadByte()) != -1 && c != '\n')
-                prefixBuilder.Append((char)c);
-            firstLine = prefixBuilder.ToString().TrimEnd('\r');
-        }
-        else
-        {
-            firstLine = ReadLine();
+            prefix = DetectFraming();
+            if (prefix == null) return ReadStatus.Eof;
         }
 
-        if (firstLine == null) return null;
+        return _framing == Framing.Ndjson
+            ? ReadNdjson(prefix, out message)
+            : ReadContentLength(prefix, out message);
+    }
 
-        var line = firstLine;
-        while (!string.IsNullOrEmpty(line))
+    /// <summary>
+    /// Consume leading whitespace and an optional UTF-8 BOM, select the framing,
+    /// and return the bytes already consumed from the first message (null at EOF).
+    /// </summary>
+    private List<byte>? DetectFraming()
+    {
+        bool first = true;
+        int ch;
+        while ((ch = ReadByteBuffered()) != -1)
         {
-            if (line.StartsWith("Content-Length: ", StringComparison.OrdinalIgnoreCase))
+            if (first && ch == 0xEF)
             {
-                if (int.TryParse(line.AsSpan(16), out var len))
-                {
-                    contentLength = len;
-                    found = true;
-                }
+                first = false;
+                int b1 = ReadByteBuffered();
+                int b2 = b1 == 0xBB ? ReadByteBuffered() : -1;
+                if (b1 == 0xBB && b2 == 0xBF) continue;
+
+                var consumed = new List<byte> { 0xEF };
+                if (b1 != -1) consumed.Add((byte)b1);
+                if (b2 != -1) consumed.Add((byte)b2);
+                return SelectFraming(Framing.ContentLength, consumed);
             }
-            line = ReadLine();
-            if (line == null) return null;
+
+            first = false;
+            if (ch is ' ' or '\t' or '\r' or '\n') continue;
+
+            return SelectFraming(
+                ch is '{' or '[' ? Framing.Ndjson : Framing.ContentLength,
+                new List<byte> { (byte)ch });
+        }
+        return null;
+    }
+
+    private List<byte> SelectFraming(Framing framing, List<byte> consumed)
+    {
+        _framing = framing;
+        Log(framing == Framing.Ndjson ? "using NDJSON framing" : "using Content-Length framing");
+        return consumed;
+    }
+
+    private ReadStatus ReadNdjson(List<byte>? prefix, out JsonNode? message)
+    {
+        message = null;
+        while (true)
+        {
+            var line = ReadLineBytes(prefix);
+            prefix = null;
+            if (line == null) return ReadStatus.Eof;
+
+            var text = Encoding.UTF8.GetString(line).TrimStart('\uFEFF');
+            if (string.IsNullOrWhiteSpace(text)) continue;
+            return TryParse(text, out message);
+        }
+    }
+
+    private ReadStatus ReadContentLength(List<byte>? prefix, out JsonNode? message)
+    {
+        message = null;
+        int? contentLength = null;
+        bool inHeaders = false;
+
+        while (true)
+        {
+            var lineBytes = ReadLineBytes(prefix);
+            prefix = null;
+            if (lineBytes == null) return ReadStatus.Eof;
+
+            var line = Encoding.UTF8.GetString(lineBytes);
+            if (line.Length == 0)
+            {
+                // Blank lines before a header block are tolerated; one after
+                // headers terminates the block.
+                if (inHeaders) break;
+                continue;
+            }
+
+            inHeaders = true;
+            const string header = "Content-Length:";
+            if (line.StartsWith(header, StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(line.AsSpan(header.Length).Trim(), out var len)
+                && len >= 0)
+            {
+                contentLength = len;
+            }
         }
 
-        if (!found) return null;
-
-        var buf = new byte[contentLength];
-        int read = 0;
-        while (read < contentLength)
+        if (contentLength == null)
         {
-            int n = _input.Read(buf, read, contentLength - read);
-            if (n == 0) return null;
+            Log("skipping header block without a valid Content-Length");
+            return ReadStatus.Skipped;
+        }
+
+        var buf = new byte[contentLength.Value];
+        int read = 0;
+        while (read < buf.Length)
+        {
+            int n = ReadBuffered(buf, read, buf.Length - read);
+            if (n == 0) return ReadStatus.Eof;
             read += n;
         }
 
-        try { return JsonNode.Parse(Encoding.UTF8.GetString(buf)); }
-        catch { return null; }
+        return TryParse(Encoding.UTF8.GetString(buf), out message);
     }
 
-    private JsonNode? ReadNdjson()
+    private ReadStatus TryParse(string text, out JsonNode? message)
     {
+        try
+        {
+            message = JsonNode.Parse(text);
+        }
+        catch (JsonException ex)
+        {
+            message = null;
+            Log($"parse error: {ex.Message}");
+            return ReadStatus.ParseError;
+        }
+
+        // JsonNode.Parse accepts duplicate property names and undecodable escapes
+        // in property names, but JsonObject builds its dictionary lazily and throws
+        // on first access. Materialize the whole tree now so such a message is
+        // rejected here rather than wherever it is first read. The top level is
+        // materialized first: if it is readable, the message can still be
+        // classified (request, notification, or response) by its members.
+        if (!TryMaterialize(message, recursive: false))
+        {
+            message = null;
+            return ReadStatus.InvalidRequest;
+        }
+
+        if (!TryMaterialize(message, recursive: true))
+        {
+            return message is JsonObject ? ReadStatus.InvalidContent : ReadStatus.InvalidRequest;
+        }
+
+        return ReadStatus.Message;
+    }
+
+    private bool TryMaterialize(JsonNode? node, bool recursive)
+    {
+        try
+        {
+            if (recursive)
+                Materialize(node);
+            else if (node is JsonObject obj)
+                foreach (var _ in obj) { }
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            // ArgumentException: duplicate property name.
+            // InvalidOperationException: undecodable property name (lone surrogate).
+            Log($"invalid message: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static void Materialize(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var property in obj)
+                    Materialize(property.Value);
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                    Materialize(item);
+                break;
+        }
+    }
+    // Read-ahead buffer over the input stream. Reading byte-at-a-time from an
+    // unbuffered stdin pipe costs a system call per byte, so all reads go
+    // through this buffer. Owned by the single reading thread.
+    private readonly byte[] _readBuffer = new byte[64 * 1024];
+    private int _readPos;
+    private int _readLen;
+
+    /// <summary>Refill the read-ahead buffer; false at end of stream.</summary>
+    private bool FillReadBuffer()
+    {
+        _readPos = 0;
+        _readLen = _input.Read(_readBuffer, 0, _readBuffer.Length);
+        return _readLen > 0;
+    }
+
+    private int ReadByteBuffered()
+    {
+        if (_readPos >= _readLen && !FillReadBuffer())
+            return -1;
+        return _readBuffer[_readPos++];
+    }
+
+    private int ReadBuffered(byte[] destination, int offset, int count)
+    {
+        if (_readPos >= _readLen)
+        {
+            // Large reads bypass the buffer once it is drained.
+            if (count >= _readBuffer.Length)
+                return _input.Read(destination, offset, count);
+            if (!FillReadBuffer())
+                return 0;
+        }
+
+        int n = Math.Min(count, _readLen - _readPos);
+        Buffer.BlockCopy(_readBuffer, _readPos, destination, offset, n);
+        _readPos += n;
+        return n;
+    }
+
+    /// <summary>
+    /// Read raw bytes up to (not including) the next <c>\n</c>, dropping a
+    /// trailing <c>\r</c>. Bytes are decoded by the caller as UTF-8. Returns
+    /// null at end of stream when no bytes were read.
+    /// </summary>
+    private byte[]? ReadLineBytes(List<byte>? prefix)
+    {
+        var line = new MemoryStream();
+        if (prefix != null)
+            line.Write(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(prefix));
+
         while (true)
         {
-            var line = ReadLine();
-            if (line == null) return null;
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            try { return JsonNode.Parse(line); }
-            catch { return null; }
-        }
-    }
+            if (_readPos >= _readLen && !FillReadBuffer())
+                return line.Length > 0 ? TrimCr(line) : null;
 
-    private string? ReadLine()
-    {
-        var sb = new StringBuilder();
-        int ch;
-        while ((ch = _input.ReadByte()) != -1)
-        {
-            if (ch == '\n')
+            var available = _readBuffer.AsSpan(_readPos, _readLen - _readPos);
+            int newline = available.IndexOf((byte)'\n');
+            if (newline >= 0)
             {
-                var s = sb.ToString();
-                if (s.EndsWith('\r')) s = s[..^1];
-                return s;
+                line.Write(available[..newline]);
+                _readPos += newline + 1;
+                return TrimCr(line);
             }
-            sb.Append((char)ch);
+
+            line.Write(available);
+            _readPos = _readLen;
         }
-        return sb.Length > 0 ? sb.ToString() : null;
     }
 
+    private static byte[] TrimCr(MemoryStream line)
+    {
+        var bytes = line.ToArray();
+        return bytes.Length > 0 && bytes[^1] == '\r' ? bytes[..^1] : bytes;
+    }
     private readonly Lock _writeLock = new();
 
     public void WriteMessage(JsonNode msg)

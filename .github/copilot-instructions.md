@@ -100,12 +100,21 @@ server.RegisterTool(new ToolInfo
 When `RawResult = true`, the handler must return a `JsonObject` with a well-formed `content` array. If the handler returns `null` or a non-`JsonObject`, it falls back to the default wrapping behavior.
 
 ### Framing Auto-Detection
-The transport auto-detects Content-Length vs NDJSON framing from the first non-whitespace byte. `{` → NDJSON, anything else → Content-Length headers. This is locked for the session after first detection.
+The transport auto-detects Content-Length vs NDJSON framing from the first non-whitespace byte, after skipping an optional UTF-8 BOM. `{` or `[` → NDJSON, anything else → Content-Length headers. This is locked for the session after first detection. Message bytes are decoded as UTF-8 in both framings.
 
 ### JSON-RPC 2.0 Compliance
 - Requests with `id` get responses; notifications (no `id`) do not
 - Unknown methods throw `InvalidOperationException` → JSON-RPC error code -32603
 - `notifications/initialized` and `notifications/cancelled` are silently accepted
+- Malformed JSON-RPC messages do not stop the reader thread:
+  - Unparseable JSON → `-32700` with `id: null`.
+  - A non-object message (including batch arrays) → `-32600`.
+  - A message with a non-string `method` (with or without an `id`), or a request with an invalid `id` type → `-32600`.
+  - A request whose `params` is not an object → `-32602`. A `_meta` that is not an object is ignored (no progress token).
+  - A duplicate or undecodable (e.g. lone-surrogate escape) property name anywhere in a message → `-32600`. The message is fully materialized after parsing. An undecodable `method` or string `id` is rejected the same way; an undecodable `id` is never echoed. When only a nested property name is affected, the message is classified by its top-level members: a request gets `-32600` with its `id`, a notification is dropped, and a response fails its pending server-initiated request instead of being answered.
+  - `RequestContext.Parse` treats a non-object `_meta`, and fields of the wrong type or with undecodable strings, as absent.
+  - Malformed notifications and responses that cannot be routed are logged to stderr and dropped.
+  - A Content-Length header block without a valid length is skipped.
 
 ### Form-Mode Elicitation (`McpSharp.Elicitation`)
 `McpServer.Elicit(...)` sends a `2025-11-25` form-mode elicitation to the client and returns an `ElicitationResult` (null when the client did not advertise form mode). The dependency-free engine is split into `FormSchemaBuilder` (schema construction, flat-object + sensitive-field guards), `ElicitationPlanner` (single-shot F1/F4/F5/F6 rewrites), `ElicitationDriver` (F2/F3/F8 round-trips + decision-field deny-safety), and `FormValidator` (server-side validation). Capabilities are parsed at `initialize`; an empty `elicitation: {}` means form-only.
@@ -144,6 +153,8 @@ Tests are in `tests/McpSharp.Tests/`:
 - **JsonNode cloning**: `JsonNode.Parse(node.ToJsonString())` is used to clone nodes because `JsonNode` can only have one parent. This appears in `HandleToolsList` (schema cloning) and transport (id/result cloning).
 - **Content-Length is byte count**: The `Content-Length` header specifies bytes, not characters. Multi-byte UTF-8 content requires `Encoding.UTF8.GetBytes(body).Length`, not `body.Length`.
 - **WriteMessage framing**: When framing is `Unknown` (no messages read yet), `WriteMessage` defaults to Content-Length framing.
+- **The transport owns the input stream**: reads go through a 64 KB read-ahead buffer, because unbuffered stdin costs a system call per byte. Nothing else may read the input stream directly once the transport is constructed.
+- **The reader writes errors synchronously**: error responses to malformed messages, and their stderr diagnostics, are written on the reader thread. A client that keeps writing without reading stdout and stderr can stall the reader once the pipes fill; standard MCP clients read both concurrently. The body buffer is sized from the `Content-Length` header, so an enormous length (near `int.MaxValue`) still ends the reader.
 
 ---
 

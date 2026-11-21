@@ -73,7 +73,9 @@ transport.Run((method, parameters) => server.Dispatch(method, parameters));
 - `Run(Func<string, JsonNode?, JsonNode?> handler, bool concurrent = false)` — Enter the event loop. When `concurrent` is true, handlers run on ThreadPool threads, allowing blocking tools (like elicitation) without starving other requests.
 - `StartReader()` — Start the background reader thread explicitly (called automatically by `Run`)
 - `TakeMessage()` / `TakeMessage(int timeoutMs, CancellationToken ct)` — Take next request from the queue (for custom dispatch loops)
-- `ReadMessage()` / `WriteMessage(JsonNode msg)` — Low-level message I/O
+- `ReadMessage()` / `WriteMessage(JsonNode msg)` — Low-level message I/O. `ReadMessage()` returns the next parseable message, skipping (and logging) unparseable or unframeable input; it returns null only at end of stream.
+
+The reader thread decodes input as UTF-8 and keeps serving after malformed JSON-RPC messages. Unparseable JSON gets a `-32700` parse error. A message that is not a JSON object or has a non-string `method`, or a request with an invalid `id`, gets a `-32600` invalid-request error. Malformed notifications and responses that cannot be routed are logged to stderr and dropped. Error responses and diagnostics are written on the reader thread, so a client must read stdout and stderr while it writes (standard MCP clients do).
 
 ### Types
 

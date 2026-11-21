@@ -269,19 +269,19 @@ public class McpTransportTests
     }
 
     [Fact]
-    public void ReadMessage_InvalidJson_ReturnsNull()
+    public void ReadMessage_UnframedGarbageThenEof_ReturnsNull()
     {
         var input = new MemoryStream(Encoding.UTF8.GetBytes("not json at all\n"));
         var output = new MemoryStream();
         var transport = new McpTransport(input, output, "test");
 
         // First read detects NDJSON (starts with 'n', not '{'), falls to Content-Length
-        // Content-Length expects "Content-Length: N" but gets "not json...", returns null
+        // The unframeable header block is skipped; end of stream then yields null
         Assert.Null(transport.ReadMessage());
     }
 
     [Fact]
-    public void ContentLength_NoContentLengthHeader_ReturnsNull()
+    public void ContentLength_HeaderBlockWithoutLength_SkippedUntilEof()
     {
         // Header that doesn't contain Content-Length
         var input = new MemoryStream(Encoding.UTF8.GetBytes("X-Custom: foo\r\n\r\n{}\r\n"));
@@ -289,10 +289,395 @@ public class McpTransportTests
         var transport = new McpTransport(input, output, "test");
 
         // 'X' is not '{' so Content-Length framing is selected
-        // But "X-Custom: foo" is not a Content-Length header, returns null
+        // The header block has no Content-Length, so it is skipped; end of stream then yields null
         Assert.Null(transport.ReadMessage());
     }
 
+    // ── Robustness: encoding and malformed input ─────────────────
+
+    private static readonly Func<string, JsonNode?, JsonNode?> EchoText =
+        (_, p) => new JsonObject { ["echo"] = p?["text"]?.DeepClone() };
+
+    private static JsonNode ResponseFor(List<JsonNode> messages, int id)
+        => messages.Single(m => m["id"] is JsonValue v && v.GetValueKind() == System.Text.Json.JsonValueKind.Number && v.GetValue<int>() == id);
+
+    private static JsonNode ErrorWithCode(List<JsonNode> messages, int code)
+        => messages.Single(m => m["error"]?["code"]?.GetValue<int>() == code);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NonAsciiText_RoundTripsIntact(bool contentLength)
+    {
+        const string text = "caf\u00e9 \u65e5\u672c \U0001F600";
+        // Clients send raw (unescaped) UTF-8, so build the requests by hand;
+        // JsonNode.ToJsonString() would escape non-ASCII as \uXXXX.
+        var requests = new[]
+        {
+            $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"echo\",\"params\":{{\"text\":\"{text}\"}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"echo\",\"params\":{{\"text\":\"{text}\"}}}}",
+        };
+        var input = contentLength ? MakeContentLengthInput(requests) : MakeNdjsonInput(requests);
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run(EchoText);
+
+        var responses = contentLength ? ParseContentLengthOutput(output) : ParseNdjsonOutput(output);
+        Assert.Equal(2, responses.Count);
+        // The first message exercises the framing-detection path; the second the steady-state path.
+        Assert.All(responses, r => Assert.Equal(text, r["result"]!["echo"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void Ndjson_LeadingUtf8Bom_IsIgnored()
+    {
+        var bytes = new byte[] { 0xEF, 0xBB, 0xBF }
+            .Concat(Encoding.UTF8.GetBytes(MakeJsonRpcRequest(1, "echo", new JsonObject { ["text"] = "hi" }) + "\n"))
+            .ToArray();
+        var output = new MemoryStream();
+        var transport = new McpTransport(new MemoryStream(bytes), output, "test");
+
+        transport.Run(EchoText);
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal("hi", response["result"]!["echo"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Ndjson_InvalidUtf8_IsReplacedNotFatal()
+    {
+        var line = Encoding.UTF8.GetBytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"echo\",\"params\":{\"text\":\"a")
+            .Concat(new byte[] { 0xFF })
+            .Concat(Encoding.UTF8.GetBytes("b\"}}\n"))
+            .ToArray();
+        var output = new MemoryStream();
+        var transport = new McpTransport(new MemoryStream(line), output, "test");
+
+        transport.Run(EchoText);
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal("a\uFFFDb", response["result"]!["echo"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Ndjson_ParseError_RespondsAndKeepsServing()
+    {
+        var input = MakeNdjsonInput(
+            MakeJsonRpcRequest(1, "tools/list"),
+            "{this is not json",
+            MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(3, messages.Count);
+        var parseError = ErrorWithCode(messages, -32700);
+        Assert.Null(parseError["id"]);
+        Assert.True(parseError.AsObject().ContainsKey("id"));
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Fact]
+    public void ContentLength_ParseError_RespondsAndKeepsServing()
+    {
+        var input = MakeContentLengthInput(
+            MakeJsonRpcRequest(1, "tools/list"),
+            "{not json}",
+            MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseContentLengthOutput(output);
+        Assert.Equal(3, messages.Count);
+        Assert.Null(ErrorWithCode(messages, -32700)["id"]);
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Fact]
+    public void ContentLength_HeaderBlockWithoutLength_SkipsAndKeepsServing()
+    {
+        var request = MakeJsonRpcRequest(1, "tools/list");
+        var raw = "X-Custom: foo\r\n\r\n"
+            + $"Content-Length: {Encoding.UTF8.GetByteCount(request)}\r\n\r\n{request}";
+        var output = new MemoryStream();
+        var transport = new McpTransport(new MemoryStream(Encoding.UTF8.GetBytes(raw)), output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var response = Assert.Single(ParseContentLengthOutput(output));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+    }
+
+    [Theory]
+    [InlineData("[1,2]", null)]
+    [InlineData("\"str\"", null)]
+    [InlineData("42", null)]
+    [InlineData("null", null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":7}", 5)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"x\"}", null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":9}", 9)]
+    // JSON-RPC 2.0 spec example: an invalid method makes this an invalid request,
+    // not a notification, so it is answered with id null.
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":1,\"params\":\"bar\"}", null)]
+    public void Ndjson_InvalidRequest_RespondsAndKeepsServing(string invalid, int? expectedId)
+    {
+        // A valid first line establishes NDJSON framing (a scalar first line
+        // would select Content-Length framing by design).
+        var input = MakeNdjsonInput(
+            MakeJsonRpcRequest(1, "tools/list"), invalid, MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(3, messages.Count);
+        var error = ErrorWithCode(messages, -32600);
+        if (expectedId is null)
+            Assert.Null(error["id"]);
+        else
+            Assert.Equal(expectedId, error["id"]!.GetValue<int>());
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Fact]
+    public void Ndjson_NonStringMethodWithoutId_GetsInvalidRequestWithNullId()
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"method\":5}",
+            MakeJsonRpcRequest(1, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(2, messages.Count);
+        Assert.Null(ErrorWithCode(messages, -32600)["id"]);
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
+    }
+
+    [Fact]
+    public void Ndjson_UnroutableResponses_DoNotStopReader()
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":{\"x\":1},\"result\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"m\"}}",
+            MakeJsonRpcRequest(1, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NonObjectParams_GetsInvalidParamsAndKeepsServing(bool concurrent)
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":[]}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"subscriptions/listen\",\"params\":[]}",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":5}",
+            MakeJsonRpcRequest(3, "tools/list"));
+        var output = new SynchronizedOutputStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
+
+        var messages = CollectNdjson(output, 3, concurrent);
+        Assert.Equal(3, messages.Count);
+        Assert.Equal(-32602, ResponseFor(messages, 1)["error"]!["code"]!.GetValue<int>());
+        Assert.Equal(-32602, ResponseFor(messages, 2)["error"]!["code"]!.GetValue<int>());
+        Assert.NotNull(ResponseFor(messages, 3)["result"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NonObjectMeta_IsIgnoredAndKeepsServing(bool concurrent)
+    {
+        var input = MakeNdjsonInput(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"_meta\":7}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"subscriptions/listen\",\"params\":{\"_meta\":7}}",
+            MakeJsonRpcRequest(3, "tools/list"));
+        var output = new SynchronizedOutputStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
+
+        var messages = CollectNdjson(output, 3, concurrent);
+        Assert.Equal(3, messages.Count);
+        Assert.Equal("tools/call", ResponseFor(messages, 1)["result"]!["ok"]!.GetValue<string>());
+        Assert.Equal("subscriptions/listen", ResponseFor(messages, 2)["result"]!["ok"]!.GetValue<string>());
+        Assert.NotNull(ResponseFor(messages, 3)["result"]);
+    }
+
+    [Theory]
+    // Top-level duplicate: the message cannot be classified, so the id is null.
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"method\":\"y\"}", null)]
+    // Nested duplicate: the request is still recognizable, so its id is echoed.
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"a\",\"name\":\"b\"}}", 1)]
+    public void DuplicateProperty_GetsInvalidRequestAndKeepsServing(string duplicate, int? expectedId)
+    {
+        var input = MakeNdjsonInput(duplicate, MakeJsonRpcRequest(2, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => new JsonObject { ["ok"] = m });
+
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(2, messages.Count);
+        var error = ErrorWithCode(messages, -32600);
+        if (expectedId is null)
+            Assert.Null(error["id"]);
+        else
+            Assert.Equal(expectedId, error["id"]!.GetValue<int>());
+        Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"x\":1,\"x\":2}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"\\uD800\":1}}")]
+    public void NestedInvalidPropertyInNotification_IsDroppedWithoutReply(string notification)
+    {
+        var dispatched = new List<string>();
+        var input = MakeNdjsonInput(notification, MakeJsonRpcRequest(1, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => { lock (dispatched) dispatched.Add(m); return new JsonObject { ["ok"] = m }; });
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+        Assert.Equal(["tools/list"], dispatched);
+    }
+
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"s-1\",\"result\":{\"action\":\"accept\",\"content\":{\"v\":1,\"v\":2}}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"s-1\",\"result\":{\"action\":\"accept\",\"content\":{\"\\uD800\":1}}}")]
+    public async Task NestedInvalidPropertyInResponse_FailsWaiterWithoutReply(string response)
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        // Lock NDJSON framing.
+        input.Write(Encoding.UTF8.GetBytes("{\"_\":0}\n"));
+        input.Position = 0;
+        transport.ReadMessage();
+        input.SetLength(0);
+        input.Position = 0;
+        output.SetLength(0);
+        output.Position = 0;
+
+        var server = new McpServer("test");
+        server.Transport = transport;
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["elicitation"] = new JsonObject() },
+        });
+
+        input.Write(Encoding.UTF8.GetBytes(response + "\n"));
+        input.Position = 0;
+
+        // Without the fix this response was dropped and Elicit (no timeout) hung;
+        // bound the wait so a regression fails instead of hanging the test run.
+        var result = await Task.Run(() => server.Elicit("Pick", new JsonObject()))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(ElicitationAction.Cancel, result!.Action);
+        var sent = ParseNdjsonOutput(output);
+        var request = Assert.Single(sent);
+        Assert.Equal("elicitation/create", request["method"]!.GetValue<string>());
+    }
+
+    // Inputs contain JSON escapes (\uD800) that JsonNode.Parse accepts but cannot
+    // decode to a string: a lone surrogate. Each case sits between two valid requests.
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"x\",\"\\uD800\":1}", true, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"x\",\"params\":{\"\\uD800\":1}}", true, 5)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"\\uD800\"}", true, 5)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"\\uD800\"}", true, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"\\uD800\",\"method\":\"x\"}", true, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"\\uD800\",\"result\":{}}", false, null)]
+    public void LoneSurrogate_IsRejectedOrDroppedAndKeepsServing(string message, bool expectError, int? expectedId)
+    {
+        foreach (var concurrent in new[] { false, true })
+        {
+            var input = MakeNdjsonInput(MakeJsonRpcRequest(1, "tools/list"), message, MakeJsonRpcRequest(2, "tools/list"));
+            var output = new SynchronizedOutputStream();
+            var transport = new McpTransport(input, output, "test");
+
+            transport.Run((m, _) => new JsonObject { ["ok"] = m }, concurrent);
+
+            var messages = CollectNdjson(output, expectError ? 3 : 2, concurrent);
+            Assert.Equal(expectError ? 3 : 2, messages.Count);
+            Assert.NotNull(ResponseFor(messages, 1)["result"]);
+            Assert.NotNull(ResponseFor(messages, 2)["result"]);
+            if (expectError)
+            {
+                var error = ErrorWithCode(messages, -32600);
+                if (expectedId is null)
+                    Assert.Null(error["id"]);
+                else
+                    Assert.Equal(expectedId, error["id"]!.GetValue<int>());
+            }
+        }
+    }
+
+    /// <summary>
+    /// Output stream whose writes and snapshots share a lock, so a test can read
+    /// output while concurrent handlers are still writing.
+    /// </summary>
+    private sealed class SynchronizedOutputStream : MemoryStream
+    {
+        private readonly object _gate = new();
+        public override void Write(byte[] buffer, int offset, int count) { lock (_gate) base.Write(buffer, offset, count); }
+        public override void Write(ReadOnlySpan<byte> buffer) { lock (_gate) base.Write(buffer); }
+        public override void WriteByte(byte value) { lock (_gate) base.WriteByte(value); }
+        public override void Flush() { lock (_gate) base.Flush(); }
+        public byte[] Snapshot() { lock (_gate) return ToArray(); }
+    }
+
+    /// <summary>
+    /// Parse the newline-terminated messages written so far. With concurrent
+    /// dispatch, Run() returns once the queue drains while ThreadPool handlers
+    /// may still be writing, so wait for the expected number of terminators and
+    /// then a short settle period to catch any unexpected extra output.
+    /// </summary>
+    private static List<JsonNode> CollectNdjson(SynchronizedOutputStream output, int expected, bool concurrent)
+    {
+        List<JsonNode> Parse()
+        {
+            var bytes = output.Snapshot();
+            var end = Array.LastIndexOf(bytes, (byte)'\n') + 1;
+            return Encoding.UTF8.GetString(bytes, 0, end)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonNode.Parse(line)!)
+                .ToList();
+        }
+
+        if (!concurrent) return Parse();
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (Parse().Count < expected && DateTime.UtcNow < deadline)
+            Thread.Sleep(20);
+        Thread.Sleep(100);
+        return Parse();
+    }
     // ── Integration: full round-trip with McpServer ──────────────
 
     [Fact]
