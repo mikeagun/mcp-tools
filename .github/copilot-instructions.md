@@ -109,9 +109,9 @@ The transport auto-detects Content-Length vs NDJSON framing from the first non-w
 - Malformed JSON-RPC messages do not stop the reader thread:
   - Unparseable JSON → `-32700` with `id: null`.
   - A non-object message (including batch arrays) → `-32600`.
-  - A request with a non-string `method` or an invalid `id` type → `-32600`.
+  - A message with a non-string `method` (with or without an `id`), or a request with an invalid `id` type → `-32600`.
   - A request whose `params` is not an object → `-32602`. A `_meta` that is not an object is ignored (no progress token).
-  - A duplicate or undecodable (e.g. lone-surrogate escape) property name anywhere in a message → `-32600`. The message is fully materialized after parsing. An undecodable `method` or string `id` is rejected the same way; an undecodable `id` is never echoed.
+  - A duplicate or undecodable (e.g. lone-surrogate escape) property name anywhere in a message → `-32600`. The message is fully materialized after parsing. An undecodable `method` or string `id` is rejected the same way; an undecodable `id` is never echoed. When only a nested property name is affected, the message is classified by its top-level members: a request gets `-32600` with its `id`, a notification is dropped, and a response fails its pending server-initiated request instead of being answered.
   - `RequestContext.Parse` treats a non-object `_meta`, and fields of the wrong type or with undecodable strings, as absent.
   - Malformed notifications and responses that cannot be routed are logged to stderr and dropped.
   - A Content-Length header block without a valid length is skipped.

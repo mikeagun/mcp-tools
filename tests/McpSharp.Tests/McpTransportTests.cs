@@ -423,6 +423,9 @@ public class McpTransportTests
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":7}", 5)]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"x\"}", null)]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":9}", 9)]
+    // JSON-RPC 2.0 spec example: an invalid method makes this an invalid request,
+    // not a notification, so it is answered with id null.
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":1,\"params\":\"bar\"}", null)]
     public void Ndjson_InvalidRequest_RespondsAndKeepsServing(string invalid, int? expectedId)
     {
         // A valid first line establishes NDJSON framing (a scalar first line
@@ -446,7 +449,7 @@ public class McpTransportTests
     }
 
     [Fact]
-    public void Ndjson_NotificationWithNonStringMethod_DroppedSilently()
+    public void Ndjson_NonStringMethodWithoutId_GetsInvalidRequestWithNullId()
     {
         var input = MakeNdjsonInput(
             "{\"jsonrpc\":\"2.0\",\"method\":5}",
@@ -456,8 +459,10 @@ public class McpTransportTests
 
         transport.Run((m, _) => new JsonObject { ["ok"] = m });
 
-        var response = Assert.Single(ParseNdjsonOutput(output));
-        Assert.Equal(1, response["id"]!.GetValue<int>());
+        var messages = ParseNdjsonOutput(output);
+        Assert.Equal(2, messages.Count);
+        Assert.Null(ErrorWithCode(messages, -32600)["id"]);
+        Assert.NotNull(ResponseFor(messages, 1)["result"]);
     }
 
     [Fact]
@@ -476,6 +481,7 @@ public class McpTransportTests
         var response = Assert.Single(ParseNdjsonOutput(output));
         Assert.Equal(1, response["id"]!.GetValue<int>());
     }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -520,9 +526,11 @@ public class McpTransportTests
     }
 
     [Theory]
-    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"method\":\"y\"}")]
-    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"a\",\"name\":\"b\"}}")]
-    public void DuplicateProperty_GetsInvalidRequestAndKeepsServing(string duplicate)
+    // Top-level duplicate: the message cannot be classified, so the id is null.
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"method\":\"y\"}", null)]
+    // Nested duplicate: the request is still recognizable, so its id is echoed.
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"a\",\"name\":\"b\"}}", 1)]
+    public void DuplicateProperty_GetsInvalidRequestAndKeepsServing(string duplicate, int? expectedId)
     {
         var input = MakeNdjsonInput(duplicate, MakeJsonRpcRequest(2, "tools/list"));
         var output = new MemoryStream();
@@ -532,17 +540,77 @@ public class McpTransportTests
 
         var messages = ParseNdjsonOutput(output);
         Assert.Equal(2, messages.Count);
-        Assert.Null(ErrorWithCode(messages, -32600)["id"]);
+        var error = ErrorWithCode(messages, -32600);
+        if (expectedId is null)
+            Assert.Null(error["id"]);
+        else
+            Assert.Equal(expectedId, error["id"]!.GetValue<int>());
         Assert.NotNull(ResponseFor(messages, 2)["result"]);
+    }
+
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"x\":1,\"x\":2}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"\\uD800\":1}}")]
+    public void NestedInvalidPropertyInNotification_IsDroppedWithoutReply(string notification)
+    {
+        var dispatched = new List<string>();
+        var input = MakeNdjsonInput(notification, MakeJsonRpcRequest(1, "tools/list"));
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        transport.Run((m, _) => { lock (dispatched) dispatched.Add(m); return new JsonObject { ["ok"] = m }; });
+
+        var response = Assert.Single(ParseNdjsonOutput(output));
+        Assert.Equal(1, response["id"]!.GetValue<int>());
+        Assert.Equal(["tools/list"], dispatched);
+    }
+
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"s-1\",\"result\":{\"action\":\"accept\",\"content\":{\"v\":1,\"v\":2}}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"s-1\",\"result\":{\"action\":\"accept\",\"content\":{\"\\uD800\":1}}}")]
+    public async Task NestedInvalidPropertyInResponse_FailsWaiterWithoutReply(string response)
+    {
+        var input = new MemoryStream();
+        var output = new MemoryStream();
+        var transport = new McpTransport(input, output, "test");
+
+        // Lock NDJSON framing.
+        input.Write(Encoding.UTF8.GetBytes("{\"_\":0}\n"));
+        input.Position = 0;
+        transport.ReadMessage();
+        input.SetLength(0);
+        input.Position = 0;
+        output.SetLength(0);
+        output.Position = 0;
+
+        var server = new McpServer("test");
+        server.Transport = transport;
+        server.Dispatch("initialize", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["elicitation"] = new JsonObject() },
+        });
+
+        input.Write(Encoding.UTF8.GetBytes(response + "\n"));
+        input.Position = 0;
+
+        // Without the fix this response was dropped and Elicit (no timeout) hung;
+        // bound the wait so a regression fails instead of hanging the test run.
+        var result = await Task.Run(() => server.Elicit("Pick", new JsonObject()))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(ElicitationAction.Cancel, result!.Action);
+        var sent = ParseNdjsonOutput(output);
+        var request = Assert.Single(sent);
+        Assert.Equal("elicitation/create", request["method"]!.GetValue<string>());
     }
 
     // Inputs contain JSON escapes (\uD800) that JsonNode.Parse accepts but cannot
     // decode to a string: a lone surrogate. Each case sits between two valid requests.
     [Theory]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"x\",\"\\uD800\":1}", true, null)]
-    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"x\",\"params\":{\"\\uD800\":1}}", true, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"x\",\"params\":{\"\\uD800\":1}}", true, 5)]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"\\uD800\"}", true, 5)]
-    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"\\uD800\"}", false, null)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"\\uD800\"}", true, null)]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"\\uD800\",\"method\":\"x\"}", true, null)]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":\"\\uD800\",\"result\":{}}", false, null)]
     public void LoneSurrogate_IsRejectedOrDroppedAndKeepsServing(string message, bool expectError, int? expectedId)

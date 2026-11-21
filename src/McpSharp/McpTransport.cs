@@ -79,6 +79,12 @@ public sealed class McpTransport
                         continue;
                     }
 
+                    if (status == ReadStatus.InvalidContent)
+                    {
+                        RejectInvalidContent((JsonObject)msg!);
+                        continue;
+                    }
+
                     if (status == ReadStatus.Skipped) continue;
 
                     try
@@ -141,9 +147,10 @@ public sealed class McpTransport
             }
             if (obj["method"] is not JsonValue methodValue || !TryGetString(methodValue, out _))
             {
-                Log("ignoring message with a missing or undecodable method");
-                if (!isNotification)
-                    WriteError(idNode, -32600, "Invalid Request: method must be a string");
+                // Without a valid method the message is not a notification, so it
+                // is answered even without an id (the id is null in that case).
+                Log("rejecting message with a missing or undecodable method");
+                WriteError(idNode, -32600, "Invalid Request: method must be a string");
                 return;
             }
 
@@ -181,6 +188,59 @@ public sealed class McpTransport
 
         Log("ignoring message that is neither a request nor a response");
         WriteError(idValid ? idNode : null, -32600, "Invalid Request: missing method");
+    }
+
+    /// <summary>
+    /// Handle a message whose top-level members are readable but which has a
+    /// duplicate or undecodable property name further down. It is never
+    /// dispatched; it is classified by its top-level members instead:
+    /// a request gets <c>-32600</c> (echoing a valid id), a notification is
+    /// dropped, and a response completes its pending server-initiated request
+    /// with an error rather than being answered.
+    /// </summary>
+    private void RejectInvalidContent(JsonObject obj)
+    {
+        const string message = "Invalid Request: duplicate or malformed property name";
+        var idNode = obj["id"];
+        var idValid = IsValidId(idNode);
+
+        if (obj.ContainsKey("method"))
+        {
+            var validNotification = idNode is null
+                && obj["method"] is JsonValue methodValue && TryGetString(methodValue, out _);
+            if (validNotification)
+            {
+                Log("dropping notification with a duplicate or malformed property name");
+                return;
+            }
+            WriteError(idValid ? idNode : null, -32600, message);
+            return;
+        }
+
+        if (obj.ContainsKey("result") || obj.ContainsKey("error"))
+        {
+            var key = idValid ? IdKey(idNode) : null;
+            Log("response has a duplicate or malformed property name");
+            if (key == null)
+                return;
+
+            var error = new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = idNode!.DeepClone(),
+                ["error"] = new JsonObject { ["code"] = -32600, ["message"] = message },
+            };
+            lock (_responseRoutingLock)
+            {
+                if (_responseWaiters.TryRemove(key, out var tcs))
+                    tcs.TrySetResult(error);
+                else
+                    _earlyResponses[key] = error;
+            }
+            return;
+        }
+
+        WriteError(idValid ? idNode : null, -32600, message);
     }
 
     /// <summary>
@@ -439,7 +499,10 @@ public sealed class McpTransport
 
     // ── Stream reading (used by reader thread) ──────────────────
 
-    private enum ReadStatus { Message, ParseError, InvalidRequest, Skipped, Eof }
+    // InvalidRequest: the message cannot be classified (unreadable top-level members).
+    // InvalidContent: top-level members are readable, but a nested property name
+    // is duplicated or undecodable; the message is returned for classification.
+    private enum ReadStatus { Message, ParseError, InvalidRequest, InvalidContent, Skipped, Eof }
 
     /// <summary>
     /// Read the next parseable message directly from the input stream (blocking).
@@ -599,19 +662,39 @@ public sealed class McpTransport
         // JsonNode.Parse accepts duplicate property names and undecodable escapes
         // in property names, but JsonObject builds its dictionary lazily and throws
         // on first access. Materialize the whole tree now so such a message is
-        // rejected here rather than wherever it is first read.
+        // rejected here rather than wherever it is first read. The top level is
+        // materialized first: if it is readable, the message can still be
+        // classified (request, notification, or response) by its members.
+        if (!TryMaterialize(message, recursive: false))
+        {
+            message = null;
+            return ReadStatus.InvalidRequest;
+        }
+
+        if (!TryMaterialize(message, recursive: true))
+        {
+            return message is JsonObject ? ReadStatus.InvalidContent : ReadStatus.InvalidRequest;
+        }
+
+        return ReadStatus.Message;
+    }
+
+    private bool TryMaterialize(JsonNode? node, bool recursive)
+    {
         try
         {
-            Materialize(message);
-            return ReadStatus.Message;
+            if (recursive)
+                Materialize(node);
+            else if (node is JsonObject obj)
+                foreach (var _ in obj) { }
+            return true;
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
             // ArgumentException: duplicate property name.
             // InvalidOperationException: undecodable property name (lone surrogate).
-            message = null;
             Log($"invalid message: {ex.Message}");
-            return ReadStatus.InvalidRequest;
+            return false;
         }
     }
 
