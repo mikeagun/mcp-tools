@@ -144,10 +144,11 @@ McpSharp includes a shared policy framework (`McpSharp.Policy` namespace) for gu
 ### Core Components
 
 - **`PolicyEngine`** — Evaluates tool calls against deny rules, user rules, and session approvals. Loads/saves policy files with atomic writes.
-  - `Load<TConfig>(classifier, matcher, ...)` — Load policy from file (explicit path, env var, or default filename)
+  - `Load<TConfig>(classifier, matcher, ...)` — Load policy from the file resolved by `PolicyFileLocator` (explicit path → env var → existing file next to the executable → `%LOCALAPPDATA%\mcp-tools\<defaultFileName>`). `defaultFileName` defaults to `<entry assembly name>-policy.json` so servers don't share a policy file.
   - `Evaluate(toolName, args)` → `PolicyEvaluation` — Core evaluation method returning decision + reason + metadata
   - `RegisterSessionApproval(rule)` / `RegisterSessionDenial(rule)` — Add session-scoped rules
-  - `SaveRuleToPolicy(rule, reason)` / `SaveDenyRuleToPolicy(rule, reason)` — Persist rules to policy file
+  - `SaveRuleToPolicy(rule, reason)` / `SaveDenyRuleToPolicy(rule, reason)` — Persist rules to the loaded policy file, creating it (and its directory) if needed
+- **`PolicyFileLocator`** — Resolves the policy file path used for both reading and saving. `PolicyFileLocator.Default` uses the executable's directory and `%LOCALAPPDATA%\mcp-tools\`; pass a custom instance (e.g. temp directories in tests) via the `fileLocator` parameter.
 - **`PolicyDispatch`** — Dispatch-level interception that wraps `tools/call` with policy checks and MCP elicitation for user confirmation.
   - `Dispatch(method, params, server, policy, optionGenerator, preValidator?, argsEnricher?, argsSummaryBuilder?, elicitationTimeoutSeconds?)` — Main entry point
   - `BuildArgsSummary(args, interestingParams?)` — Format tool args for display in elicitation prompts

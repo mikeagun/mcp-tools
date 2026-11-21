@@ -1318,6 +1318,107 @@ public class SuggestionGenerationTests
 }
 public class PolicyPersistenceTests
 {
+    // -- Policy file location (Program.LoadHyperVConfig) ---------------------
+
+    private sealed class TempPolicyDirs : IDisposable
+    {
+        public string Root { get; } = Path.Combine(Path.GetTempPath(), $"policy-test-{Guid.NewGuid()}");
+        public string ExeDir => Path.Combine(Root, "exe");
+        public string UserDir => Path.Combine(Root, "localappdata", PolicyFileLocator.UserDirectoryName);
+        public PolicyFileLocator Locator => new(ExeDir, UserDir);
+
+        // Unique, normally-unset variable so a real HYPERV_MCP_POLICY on the
+        // machine can't redirect these tests to the user's policy file.
+        public string EnvVar { get; } = $"HYPERV_MCP_TEST_POLICY_{Guid.NewGuid():N}";
+
+        public TempPolicyDirs() => Directory.CreateDirectory(ExeDir);
+
+        public void Dispose()
+        {
+            try { Directory.Delete(Root, recursive: true); }
+            catch { /* best effort */ }
+        }
+    }
+
+    private static void WritePolicy(string path, PolicyMode mode)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, $$"""{ "mode": "{{mode.ToString().ToLowerInvariant()}}" }""");
+    }
+
+    [Fact]
+    public void LoadHyperVConfig_NoFile_ResolvesToPerUserPath()
+    {
+        using var dirs = new TempPolicyDirs();
+
+        var (config, path) = Program.LoadHyperVConfig(null, dirs.Locator, dirs.EnvVar);
+
+        Assert.Equal(PolicyMode.Standard, config.Mode);
+        Assert.Equal(Path.Combine(dirs.UserDir, "hyperv-mcp-policy.json"), path);
+        Assert.False(Directory.Exists(dirs.UserDir));
+    }
+
+    [Fact]
+    public void LoadHyperVConfig_ReadsPerUserFile()
+    {
+        using var dirs = new TempPolicyDirs();
+        var userFile = Path.Combine(dirs.UserDir, "hyperv-mcp-policy.json");
+        WritePolicy(userFile, PolicyMode.Unrestricted);
+
+        var (config, path) = Program.LoadHyperVConfig(null, dirs.Locator, dirs.EnvVar);
+
+        Assert.Equal(PolicyMode.Unrestricted, config.Mode);
+        Assert.Equal(userFile, path);
+    }
+
+    [Fact]
+    public void LoadHyperVConfig_PrefersExistingFileNextToExe()
+    {
+        using var dirs = new TempPolicyDirs();
+        var exeFile = Path.Combine(dirs.ExeDir, "hyperv-mcp-policy.json");
+        WritePolicy(exeFile, PolicyMode.Unrestricted);
+        WritePolicy(Path.Combine(dirs.UserDir, "hyperv-mcp-policy.json"), PolicyMode.Standard);
+
+        var (config, path) = Program.LoadHyperVConfig(null, dirs.Locator, dirs.EnvVar);
+
+        Assert.Equal(PolicyMode.Unrestricted, config.Mode);
+        Assert.Equal(exeFile, path);
+    }
+
+    [Fact]
+    public void LoadHyperVConfig_ExplicitPathTakesPrecedence()
+    {
+        using var dirs = new TempPolicyDirs();
+        WritePolicy(Path.Combine(dirs.ExeDir, "hyperv-mcp-policy.json"), PolicyMode.Standard);
+        var explicitFile = Path.Combine(dirs.Root, "explicit.json");
+        WritePolicy(explicitFile, PolicyMode.Unrestricted);
+
+        var (config, path) = Program.LoadHyperVConfig(explicitFile, dirs.Locator, dirs.EnvVar);
+
+        Assert.Equal(PolicyMode.Unrestricted, config.Mode);
+        Assert.Equal(explicitFile, path);
+    }
+
+    [Fact]
+    public void LoadHyperVConfig_EnvVarTakesPrecedenceOverFileNextToExe()
+    {
+        using var dirs = new TempPolicyDirs();
+        WritePolicy(Path.Combine(dirs.ExeDir, "hyperv-mcp-policy.json"), PolicyMode.Standard);
+        var envFile = Path.Combine(dirs.Root, "from-env.json");
+        WritePolicy(envFile, PolicyMode.Unrestricted);
+        Environment.SetEnvironmentVariable(dirs.EnvVar, envFile);
+        try
+        {
+            var (config, path) = Program.LoadHyperVConfig(null, dirs.Locator, dirs.EnvVar);
+
+            Assert.Equal(PolicyMode.Unrestricted, config.Mode);
+            Assert.Equal(envFile, path);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(dirs.EnvVar, null);
+        }
+    }
     [Fact]
     public void SaveRuleToPolicy_CreatesFile()
     {
@@ -1401,11 +1502,20 @@ public class PolicyPersistenceTests
     [Fact]
     public void Load_DefaultsToStandard()
     {
-        var config = new HyperVPolicyConfig();
-        var classifier = new HyperVToolClassifier(config);
-        var matcher = new HyperVRuleMatcher(classifier);
-        var engine = PolicyEngine.Load<HyperVPolicyConfig>(classifier, matcher);
-        Assert.Equal(PolicyMode.Standard, ((HyperVPolicyConfig)engine.Config).Mode);
+        var tempDir = Path.Combine(Path.GetTempPath(), $"policy-test-{Guid.NewGuid()}");
+        try
+        {
+            var config = new HyperVPolicyConfig();
+            var classifier = new HyperVToolClassifier(config);
+            var matcher = new HyperVRuleMatcher(classifier);
+            var engine = PolicyEngine.Load<HyperVPolicyConfig>(classifier, matcher,
+                fileLocator: new PolicyFileLocator(Path.Combine(tempDir, "exe"), Path.Combine(tempDir, "user")));
+            Assert.Equal(PolicyMode.Standard, ((HyperVPolicyConfig)engine.Config).Mode);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
     }
 
     [Fact]

@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Targets .NET 10 (`net10.0`, previously `net9.0-windows`) and declares Windows support with `SupportedOSPlatform("windows")`. Runs on a newer major .NET runtime when .NET 10 is not installed.
 - `Microsoft.PowerShell.SDK` is updated to 7.6.10.
+- Policy rules approved via elicitation are saved to `%LOCALAPPDATA%\mcp-tools\hyperv-mcp-policy.json` unless a policy file is configured (`--policy` or `HYPERV_MCP_POLICY`) or `hyperv-mcp-policy.json` already exists next to the executable. Previously they were saved next to the executable, where an upgrade or reinstall that replaced the install directory lost them, and saving failed if that directory was not writable. That per-user file is also read at startup.
 
 ### Fixed
 

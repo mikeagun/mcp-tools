@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Targets .NET 10 (`net10.0`) instead of .NET 9.
+- Policy files are resolved by the new `PolicyFileLocator`. A policy file is read from, and approved rules are saved to, the first of: an explicit path, the server's environment variable, an existing `<name>-policy.json` next to the executable, or `%LOCALAPPDATA%\mcp-tools\<name>-policy.json`. Saves create the file and its directory. The per-user directory is resolved without requiring it to exist yet. `PolicyEngine.Load` and the `PolicyEngine` constructor take an optional `fileLocator`, and `PolicyEngine.DefaultPolicyFilePath` now returns the per-user path instead of a path next to the executable.
+- When no `defaultFileName` is given, `PolicyEngine` uses `<entry assembly name>-policy.json` instead of `policy.json`, so servers sharing the per-user directory don't share rules.
 
 ### Fixed
 
