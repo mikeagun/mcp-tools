@@ -2,10 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Always run on the newest installed runtime: MSBuildLocator only registers .NET SDKs whose
+         major version is not newer than the running runtime, so e.g. a machine with only the
+         .NET 11 SDK needs this server on the .NET 11 runtime to evaluate projects. -->
+    <RollForward>LatestMajor</RollForward>
     <AssemblyName>msbuild-mcp</AssemblyName>
     <RootNamespace>MsBuildMcp</RootNamespace>
     <Version>0.1.0</Version>
@@ -31,7 +35,7 @@
     <PackageReference Include="Microsoft.Build" Version="17.12.6" ExcludeAssets="runtime" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Build.Locator" Version="1.7.8" />
     <!-- Required at runtime by VS MSBuild evaluation — ExcludeAssets on Microsoft.Build prevents transitive resolution -->
-    <PackageReference Include="System.Configuration.ConfigurationManager" Version="9.0.0" />
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="10.0.15" />
   </ItemGroup>
 
 </Project>

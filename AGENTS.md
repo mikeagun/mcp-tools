@@ -14,7 +14,7 @@ This repository contains a shared **MCP (Model Context Protocol)** library and f
 | **MsBuildMcp** (`src/MsBuildMcp/`) | MSBuild solution/project evaluation, dependency graphs, builds, guardrails |
 | **ElicitMcp** (`src/ElicitMcp/`) | Agent-facing elicitation (decision/input) + form-mode conformance/showcase harness |
 
-**Tech stack**: C# / .NET 9 / JSON-RPC 2.0 over stdio
+**Tech stack**: C# / .NET 10 / JSON-RPC 2.0 over stdio
 
 ## Essential Documents
 

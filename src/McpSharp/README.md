@@ -6,7 +6,7 @@ Provides a JSON-RPC 2.0 stdio transport with auto-detection of Content-Length an
 
 ## Prerequisites
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 
 ## Building
 

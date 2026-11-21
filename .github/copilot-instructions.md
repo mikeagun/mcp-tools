@@ -2,7 +2,7 @@
 
 ## Repository Overview
 
-This repository contains a shared MCP protocol library and four MCP servers for AI-assisted development workflows. All projects are .NET 9 and communicate via JSON-RPC 2.0 over stdio.
+This repository contains a shared MCP protocol library and four MCP servers for AI-assisted development workflows. All projects are .NET 10 and communicate via JSON-RPC 2.0 over stdio.
 
 | Project | Location | Description |
 |---------|----------|-------------|
@@ -399,10 +399,12 @@ src/MsBuildMcp/
 
 ### MSBuild Registration Strategy
 The server uses a **dual MSBuild strategy**:
-- **In-process evaluation**: Uses `MSBuildLocator.RegisterDefaults()` (dotnet SDK MSBuild) which has working .NET 9 SDK resolvers. VCTargetsPath from Visual Studio is set as an env var for C++ project support.
+- **In-process evaluation**: Uses `MSBuildLocator.RegisterDefaults()` (dotnet SDK MSBuild) which has working .NET SDK resolvers. VCTargetsPath from Visual Studio is set as an env var for C++ project support.
 - **Build subprocess**: Uses VS `MSBuild.exe` directly (with `vcvarsall` for the full C++ build environment).
 
-This split exists because VS MSBuild's SDK resolver DLLs target .NET Framework and can't load in a .NET 9 host. See `ProjectEngine.EnsureMsBuildRegistered()` and `VsToolchainProvider.CaptureToolchain()`.
+This split exists because VS MSBuild's SDK resolver DLLs target .NET Framework and can't load in a .NET host. See `ProjectEngine.EnsureMsBuildRegistered()` and `VsToolchainProvider.CaptureToolchain()`.
+
+MSBuildLocator only registers .NET SDKs whose major version is not newer than the running runtime, so `MsBuildMcp.csproj` sets `RollForward=LatestMajor` (the other servers use `Major`): the server always runs on the newest installed runtime and can use a newer SDK (e.g. only the .NET 11 SDK installed).
 
 ### Visual Studio Selection
 Both sides of the dual strategy use the same `vswhere`-discovered installation, chosen by `VsToolchainProvider` from `--vs <selector>` > `MSBUILD_MCP_VS` > `latest`. `VsSelector` accepts `latest`, a product year (`2022`), a version prefix (`17.14`), a version range (`[17,18)`), or an installation path; selections must match an installation reported by `vswhere`. VS 2026 reports `productLineVersion` `18` (not the year), so years are inferred from the major version. `VCTargetsPath` is the highest `MSBuild\Microsoft\VC\vNNN` directory containing `Microsoft.Cpp.Default.props` — newer VS versions ship incomplete stub directories for older versions.

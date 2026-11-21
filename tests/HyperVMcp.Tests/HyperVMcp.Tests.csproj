@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
@@ -9,6 +9,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\HyperVMcp\HyperVMcp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- HyperVMcp is Windows-only (declared via SupportedOSPlatform rather than a -windows TFM). -->
+    <AssemblyAttribute Include="System.Runtime.Versioning.SupportedOSPlatformAttribute">
+      <_Parameter1>windows</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
   <ItemGroup>

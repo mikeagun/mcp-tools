@@ -54,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Decision-field deny-safety and sensitive-field guard preserved; URL mode not implemented
   - Built on the `McpSharp.Elicitation` engine; no policy/guardrail layer (interactive only)
 
+### Changed
+
+- All projects target .NET 10 (`net10.0`, LTS) instead of .NET 9, which reached end of support on 2026-11-10. Building requires the .NET 10 SDK or later (`global.json` rolls forward to a newer major SDK when 10 is not installed).
+- The servers roll forward to a newer major .NET runtime when .NET 10 is not installed. MsBuildMcp always runs on the newest installed runtime (`LatestMajor`) so it can evaluate projects with a newer .NET SDK.
+- **HyperVMcp** — Targets plain `net10.0` (previously `net9.0-windows`) and declares Windows support with `SupportedOSPlatform("windows")`; `Microsoft.PowerShell.SDK` is updated to 7.6.10.
+- **MsBuildMcp** — `System.Configuration.ConfigurationManager` is updated to 10.0.15.
+
 ### Fixed
 
 - **CiDebugMcp** — Authentication-failure retries prompt the user via elicitation (the server wires `McpServer.Transport`) instead of failing straight to a STOP error.

@@ -15,7 +15,7 @@ Provides **26 structured tools** for VM lifecycle management, remote command exe
 
 ## Prerequisites
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) (Windows)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (Windows)
 - Hyper-V enabled on the host
 - `sudo` available for elevated operations (Windows 11+ or [gsudo](https://github.com/gerardog/gsudo))
 - VM credentials stored in Windows Credential Manager (or provided explicitly)

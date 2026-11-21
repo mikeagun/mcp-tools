@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>HyperVMcp</RootNamespace>
     <AssemblyName>hyperv-mcp</AssemblyName>
     <AssemblyTitle>Hyper-V MCP Server</AssemblyTitle>
@@ -11,10 +11,17 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Run on a newer major runtime when the targeted one is not installed. -->
+    <RollForward>Major</RollForward>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="HyperVMcp.Tests" />
+    <!-- Hyper-V is Windows-only. A plain net10.0 TFM (rather than net10.0-windows) is used so the
+         server can be packed as a .NET tool, so declare the platform for the CA1416 analyzer here. -->
+    <AssemblyAttribute Include="System.Runtime.Versioning.SupportedOSPlatformAttribute">
+      <_Parameter1>windows</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
   <ItemGroup>
@@ -22,7 +29,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.5.0" />
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.6.10" />
   </ItemGroup>
 
 </Project>

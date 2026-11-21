@@ -141,7 +141,7 @@ public static class BuildTools
                     ["framework"] = new JsonObject
                     {
                         ["type"] = "string",
-                        ["description"] = "Target framework (e.g. 'net9.0'). Optional — defaults to " +
+                        ["description"] = "Target framework (e.g. 'net10.0'). Optional — defaults to " +
                                           "the project's target framework.",
                     },
                     ["output"] = new JsonObject
