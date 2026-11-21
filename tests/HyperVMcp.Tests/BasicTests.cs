@@ -15,7 +15,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_AddOutput_MaintainsBuffer()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test", outputMode: "full");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test", outputMode: "full");
 
         job.AddOutput("line1");
         job.AddOutput("line2");
@@ -29,11 +29,20 @@ public class TypesTests
     }
 
     [Fact]
+    public void CommandJob_RetainsImmutableVmIdentity()
+    {
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
+
+        Assert.Equal("s-1", job.SessionId);
+        Assert.Equal("test-vm", job.VmName);
+    }
+
+    [Fact]
     public void CommandJob_TailMode_DropsOldLines()
     {
         // OutputBuffer tail mode keeps last TailModeMaxLines (1000),
         // but we can test the concept by adding more than that.
-        var job = new CommandJob("cmd-1", "s-1", "test", outputMode: "tail");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test", outputMode: "tail");
         for (var i = 0; i < 1005; i++)
             job.AddOutput($"line-{i}");
 
@@ -47,7 +56,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_Complete_SetsStatus()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         Assert.Equal(CommandStatus.Running, job.Status);
 
         job.Complete(0);
@@ -58,7 +67,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_CompleteFailed_SetsFailedStatus()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
 
         job.Complete(1);
         Assert.Equal(CommandStatus.Failed, job.Status);
@@ -68,7 +77,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_Fail_SetsErrorAndStatus()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
 
         job.Fail("something broke");
         Assert.Equal(CommandStatus.Failed, job.Status);
@@ -80,7 +89,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_WaitForNews_ReturnsOnComplete()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
 
         // Complete in background after a short delay.
         _ = Task.Run(async () =>
@@ -97,7 +106,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_WaitForNews_TimesOut()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         var got = job.WaitForNews(50);
         Assert.False(got);
         Assert.Equal(CommandStatus.Running, job.Status);
@@ -106,7 +115,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_WaitForCompletion_ReturnsOnComplete()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
 
         _ = Task.Run(async () =>
         {
@@ -127,7 +136,7 @@ public class TypesTests
     {
         // Unlike WaitForNews, WaitForCompletion must keep waiting through output
         // lines and only return when the command completes (or times out).
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
 
         _ = Task.Run(async () =>
         {
@@ -148,7 +157,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_WaitForCompletion_TimesOutWhileRunning()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         var sw = System.Diagnostics.Stopwatch.StartNew();
         job.WaitForCompletion(150);
         sw.Stop();
@@ -160,7 +169,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_WaitForCompletion_AlreadyCompleted_ReturnsImmediately()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         job.Complete(0);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -180,7 +189,7 @@ public class TypesTests
         // exercise the check/Reset/Wait race.
         for (var i = 0; i < 25; i++)
         {
-            var job = new CommandJob($"cmd-{i}", "s-1", "test");
+            var job = new CommandJob($"cmd-{i}", "s-1", "test-vm", "test");
             var start = new ManualResetEventSlim(false);
             var completer = new Thread(() =>
             {
@@ -205,7 +214,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_GetSnapshot_TailLines()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         for (int i = 0; i < 50; i++)
             job.AddOutput($"line-{i}");
 
@@ -219,7 +228,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_Dispose_DoesNotThrow()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         job.AddOutput("test");
         job.Dispose();
         job.Dispose(); // Double-dispose should be safe.
@@ -228,7 +237,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_TimedOut_SetsStatus()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         job.TimedOut();
         Assert.Equal(CommandStatus.TimedOut, job.Status);
     }
@@ -236,7 +245,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_Cancel_SetsStatus()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         job.Cancel();
         Assert.Equal(CommandStatus.Cancelled, job.Status);
     }
@@ -244,7 +253,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_GetSnapshot_WithSinceLine()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         for (var i = 1; i <= 10; i++)
             job.AddOutput($"line-{i}");
 
@@ -257,7 +266,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_GetSnapshot_ExcludeOutput()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         job.AddOutput("some output");
 
         var snapshot = job.GetSnapshot(includeOutput: false);
@@ -267,14 +276,14 @@ public class TypesTests
     [Fact]
     public void CommandJob_ProgressSummary_NullBeforeAnyOutput()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         Assert.Null(job.ProgressSummary());
     }
 
     [Fact]
     public void CommandJob_ProgressSummary_ReportsCountAndLastLine()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         job.AddOutput("Building core_lib...");
         job.AddOutput("Linking...");
 
@@ -284,7 +293,7 @@ public class TypesTests
     [Fact]
     public void CommandJob_ProgressSummary_IncludesStderrCount()
     {
-        var job = new CommandJob("cmd-1", "s-1", "test");
+        var job = new CommandJob("cmd-1", "s-1", "test-vm", "test");
         job.AddOutput("compiling...");
         job.AddError("warning: deprecated");
         job.AddError("warning: unused");
