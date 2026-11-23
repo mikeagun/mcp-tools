@@ -175,9 +175,10 @@ Commands executed via `invoke_command` are checked against pattern lists:
 The server looks for a policy file in this order:
 1. `--policy <path>` CLI argument
 2. `HYPERV_MCP_POLICY` environment variable
-3. `hyperv-mcp-policy.json` next to the executable
+3. `hyperv-mcp-policy.json` next to the executable, if it already exists
+4. `%LOCALAPPDATA%\mcp-tools\hyperv-mcp-policy.json`
 
-The policy file is auto-created when you select permanent approval or denial options via elicitation.
+Permanent approvals and denials selected via elicitation are saved to the file that was found. If no file exists, it is created under `%LOCALAPPDATA%\mcp-tools\`, so saved rules survive upgrades or reinstalls that replace the install directory.
 
 ### Disabling Confirmation
 

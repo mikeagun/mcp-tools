@@ -95,7 +95,7 @@ public static class Program
         var matcher = new HyperVRuleMatcher(classifier);
         var optionGenerator = new HyperVOptionGenerator(classifier);
         var policy = new PolicyEngine(hvConfig, classifier, matcher, resolvedPolicyPath,
-            defaultFileName: "hyperv-mcp-policy.json");
+            defaultFileName: PolicyFileName);
 
         // Create MCP server and register tools.
         var server = new McpServer("hyperv-mcp", McpServer.VersionOf(typeof(Program).Assembly));
@@ -166,13 +166,21 @@ public static class Program
         return null;
     }
 
-    static (HyperVPolicyConfig config, string? resolvedPath) LoadHyperVConfig(string? explicitPath)
-    {
-        var path = explicitPath
-            ?? Environment.GetEnvironmentVariable("HYPERV_MCP_POLICY")
-            ?? FindPolicyFileNextToExe();
+    internal const string PolicyFileName = "hyperv-mcp-policy.json";
+    internal const string PolicyEnvVar = "HYPERV_MCP_POLICY";
 
-        if (path != null && File.Exists(path))
+    /// <summary>
+    /// Loads the HyperV policy from the file resolved by
+    /// <see cref="PolicyFileLocator.Resolve"/> and returns that path, which
+    /// approved rules are later saved to.
+    /// </summary>
+    internal static (HyperVPolicyConfig config, string resolvedPath) LoadHyperVConfig(
+        string? explicitPath, PolicyFileLocator? fileLocator = null, string envVarName = PolicyEnvVar)
+    {
+        var path = (fileLocator ?? PolicyFileLocator.Default)
+            .Resolve(explicitPath, envVarName, PolicyFileName);
+
+        if (File.Exists(path))
         {
             try
             {
@@ -189,14 +197,8 @@ public static class Program
         }
         else
         {
-            Console.Error.WriteLine("hyperv-mcp: no policy file found, using default standard policy");
+            Console.Error.WriteLine($"hyperv-mcp: no policy file found, using default standard policy (rules will be saved to {path})");
         }
         return (new HyperVPolicyConfig(), path);
-    }
-
-    static string? FindPolicyFileNextToExe()
-    {
-        var candidate = Path.Combine(AppContext.BaseDirectory, "hyperv-mcp-policy.json");
-        return File.Exists(candidate) ? candidate : null;
     }
 }

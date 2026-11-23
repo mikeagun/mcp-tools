@@ -16,11 +16,22 @@ namespace McpSharp.Tests;
 public class PolicyEngineTests : IDisposable
 {
     private readonly string _tempDir;
+    private readonly string _exeDir;
+    private readonly string _userDir;
+    private readonly PolicyFileLocator _locator;
 
     public PolicyEngineTests()
     {
         _tempDir = Path.Combine(Path.GetTempPath(), $"policy-test-{Guid.NewGuid()}");
         Directory.CreateDirectory(_tempDir);
+
+        // Stand-ins for the executable directory and %LOCALAPPDATA%\mcp-tools so
+        // tests never touch the real install directory or user profile. The user
+        // directory is intentionally not created up front.
+        _exeDir = Path.Combine(_tempDir, "exe");
+        Directory.CreateDirectory(_exeDir);
+        _userDir = Path.Combine(_tempDir, "localappdata", PolicyFileLocator.UserDirectoryName);
+        _locator = new PolicyFileLocator(_exeDir, _userDir);
     }
 
     public void Dispose()
@@ -29,37 +40,46 @@ public class PolicyEngineTests : IDisposable
         catch { /* best effort */ }
     }
 
-    // -- Filename mismatch fix ----------------------------------------
+    // -- Policy file location -----------------------------------------
 
     [Fact]
-    public void SaveRule_UsesDefaultFileName_WhenPolicyFilePathNull()
+    public void SaveRule_CreatesPerUserFile_WhenPolicyFilePathNull()
     {
         var engine = new PolicyEngine(
             new PolicyConfig(), new AllowAllClassifier(), new MatchAllMatcher(),
-            policyFilePath: null, defaultFileName: "my-server-policy.json");
+            policyFilePath: null, defaultFileName: "my-server-policy.json",
+            fileLocator: _locator);
 
         engine.SaveRuleToPolicy(
             new ApprovalRule { Tools = ["build"] }, "test");
 
-        // File should be created with the custom default name, not "policy.json".
-        var expectedPath = Path.Combine(AppContext.BaseDirectory, "my-server-policy.json");
-        try
-        {
-            Assert.True(File.Exists(expectedPath),
-                $"Expected policy file at {expectedPath}");
+        // Saved under the (newly created) per-user directory with the custom
+        // default name — not next to the exe, and not as "policy.json".
+        var expectedPath = Path.Combine(_userDir, "my-server-policy.json");
+        Assert.True(File.Exists(expectedPath), $"Expected policy file at {expectedPath}");
+        Assert.Empty(Directory.GetFiles(_exeDir));
 
-            var json = File.ReadAllText(expectedPath);
-            var config = JsonSerializer.Deserialize<PolicyConfig>(json, PolicyConfig.JsonOptions);
-            Assert.NotNull(config?.UserRules);
-            Assert.Single(config!.UserRules!);
-        }
-        finally
-        {
-            // Clean up the file created next to the exe.
-            if (File.Exists(expectedPath)) File.Delete(expectedPath);
-            var tmpPath = expectedPath + ".tmp";
-            if (File.Exists(tmpPath)) File.Delete(tmpPath);
-        }
+        var json = File.ReadAllText(expectedPath);
+        var config = JsonSerializer.Deserialize<PolicyConfig>(json, PolicyConfig.JsonOptions);
+        Assert.NotNull(config?.UserRules);
+        Assert.Single(config!.UserRules!);
+    }
+
+    [Fact]
+    public void SaveRule_UsesExistingFileNextToExe_WhenPolicyFilePathNull()
+    {
+        var exeFile = Path.Combine(_exeDir, "my-server-policy.json");
+        File.WriteAllText(exeFile, "{}");
+        var engine = new PolicyEngine(
+            new PolicyConfig(), new AllowAllClassifier(), new MatchAllMatcher(),
+            policyFilePath: null, defaultFileName: "my-server-policy.json",
+            fileLocator: _locator);
+
+        engine.SaveRuleToPolicy(
+            new ApprovalRule { Tools = ["build"] }, "test");
+
+        Assert.Single(JsonNode.Parse(File.ReadAllText(exeFile))!["user_rules"]!.AsArray());
+        Assert.False(Directory.Exists(_userDir));
     }
 
     [Fact]
@@ -68,14 +88,173 @@ public class PolicyEngineTests : IDisposable
         var policyFile = Path.Combine(_tempDir, "explicit.json");
         var engine = new PolicyEngine(
             new PolicyConfig(), new AllowAllClassifier(), new MatchAllMatcher(),
-            policyFilePath: policyFile, defaultFileName: "should-not-use.json");
+            policyFilePath: policyFile, defaultFileName: "should-not-use.json",
+            fileLocator: _locator);
 
         engine.SaveRuleToPolicy(
             new ApprovalRule { Tools = ["build"] }, "test");
 
         Assert.True(File.Exists(policyFile));
-        Assert.False(File.Exists(
-            Path.Combine(AppContext.BaseDirectory, "should-not-use.json")));
+        Assert.False(File.Exists(Path.Combine(_exeDir, "should-not-use.json")));
+        Assert.False(Directory.Exists(_userDir));
+    }
+
+    [Fact]
+    public void SaveRule_CreatesMissingDirectoryOfExplicitPath()
+    {
+        var policyFile = Path.Combine(_tempDir, "nested", "dir", "policy.json");
+        var engine = new PolicyEngine(
+            new PolicyConfig(), new AllowAllClassifier(), new MatchAllMatcher(),
+            policyFilePath: policyFile);
+
+        engine.SaveRuleToPolicy(
+            new ApprovalRule { Tools = ["build"] }, "test");
+
+        Assert.True(File.Exists(policyFile));
+    }
+
+    [Fact]
+    public void Resolve_FallsBackToPerUserPath_WhenNoFileNextToExe()
+    {
+        Assert.Equal(
+            Path.Combine(_userDir, "my-server-policy.json"),
+            _locator.Resolve(null, null, "my-server-policy.json"));
+    }
+
+    [Fact]
+    public void Resolve_PrefersExistingFileNextToExe_OverPerUserFile()
+    {
+        var exeFile = Path.Combine(_exeDir, "my-server-policy.json");
+        File.WriteAllText(exeFile, "{}");
+        Directory.CreateDirectory(_userDir);
+        File.WriteAllText(Path.Combine(_userDir, "my-server-policy.json"), "{}");
+
+        Assert.Equal(exeFile, _locator.Resolve(null, null, "my-server-policy.json"));
+    }
+
+    [Fact]
+    public void Resolve_ExplicitPathAndEnvVar_TakePrecedence()
+    {
+        File.WriteAllText(Path.Combine(_exeDir, "my-server-policy.json"), "{}");
+        var envVar = $"MCPSHARP_TEST_POLICY_{Guid.NewGuid():N}";
+        var envPath = Path.Combine(_tempDir, "from-env.json");
+        var explicitPath = Path.Combine(_tempDir, "explicit.json");
+        Environment.SetEnvironmentVariable(envVar, envPath);
+        try
+        {
+            // Neither file needs to exist: an explicit or env path is always used.
+            Assert.Equal(explicitPath, _locator.Resolve(explicitPath, envVar, "my-server-policy.json"));
+            Assert.Equal(envPath, _locator.Resolve(null, envVar, "my-server-policy.json"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envVar, null);
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Resolve_IgnoresEmptyExplicitPathAndEnvVar(string empty)
+    {
+        var envVar = $"MCPSHARP_TEST_POLICY_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(envVar, empty);
+        try
+        {
+            Assert.Equal(
+                Path.Combine(_userDir, "my-server-policy.json"),
+                _locator.Resolve(empty, envVar, "my-server-policy.json"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envVar, null);
+        }
+    }
+
+    [Theory]
+    [InlineData("my-server", "my-server-policy.json")]
+    [InlineData(null, "policy.json")]
+    [InlineData("", "policy.json")]
+    public void DefaultFileNameFor_UsesEntryAssemblyName(string? assemblyName, string expected)
+    {
+        Assert.Equal(expected, PolicyEngine.DefaultFileNameFor(assemblyName));
+    }
+
+    [Fact]
+    public void Load_NullDefaultFileName_UsesPerServerFileName()
+    {
+        var engine = PolicyEngine.Load<PolicyConfig>(
+            new AllowAllClassifier(), new MatchAllMatcher(), fileLocator: _locator);
+
+        var expectedName = PolicyEngine.DefaultFileNameFor(
+            System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name);
+        Assert.Equal(Path.Combine(_userDir, expectedName), engine.PolicyFilePath);
+    }
+
+    [Fact]
+    public void SaveRule_NullDefaultFileName_UsesPerServerFileName()
+    {
+        var engine = new PolicyEngine(
+            new PolicyConfig(), new AllowAllClassifier(), new MatchAllMatcher(),
+            fileLocator: _locator);
+
+        engine.SaveRuleToPolicy(new ApprovalRule { Tools = ["build"] }, "test");
+
+        Assert.True(File.Exists(Path.Combine(_userDir, PolicyEngine.DefaultFileName)));
+    }
+
+    [Fact]
+    public void Load_NoFile_SavesToPerUserPath()
+    {
+        var engine = PolicyEngine.Load<PolicyConfig>(
+            new AllowAllClassifier(), new MatchAllMatcher(),
+            defaultFileName: "my-server-policy.json", fileLocator: _locator);
+
+        var expectedPath = Path.Combine(_userDir, "my-server-policy.json");
+        Assert.Equal(expectedPath, engine.PolicyFilePath);
+        Assert.Null(engine.Config.UserRules);
+
+        engine.SaveRuleToPolicy(new ApprovalRule { Tools = ["build"] }, "test");
+        Assert.True(File.Exists(expectedPath));
+    }
+
+    [Fact]
+    public void Load_ReadsPerUserFile()
+    {
+        Directory.CreateDirectory(_userDir);
+        var userFile = Path.Combine(_userDir, "my-server-policy.json");
+        File.WriteAllText(userFile, JsonSerializer.Serialize(new PolicyConfig
+        {
+            UserRules = [new UserRule { Rule = new ApprovalRule { Tools = ["build"] } }],
+        }, PolicyConfig.JsonOptions));
+
+        var engine = PolicyEngine.Load<PolicyConfig>(
+            new AllowAllClassifier(), new MatchAllMatcher(),
+            defaultFileName: "my-server-policy.json", fileLocator: _locator);
+
+        Assert.Equal(userFile, engine.PolicyFilePath);
+        Assert.Single(engine.Config.UserRules!);
+    }
+
+    [Fact]
+    public void Load_ExistingFileNextToExe_IsReadAndSavedTo()
+    {
+        var exeFile = Path.Combine(_exeDir, "my-server-policy.json");
+        File.WriteAllText(exeFile, JsonSerializer.Serialize(new PolicyConfig
+        {
+            UserRules = [new UserRule { Rule = new ApprovalRule { Tools = ["build"] } }],
+        }, PolicyConfig.JsonOptions));
+
+        var engine = PolicyEngine.Load<PolicyConfig>(
+            new AllowAllClassifier(), new MatchAllMatcher(),
+            defaultFileName: "my-server-policy.json", fileLocator: _locator);
+
+        Assert.Equal(exeFile, engine.PolicyFilePath);
+        Assert.Single(engine.Config.UserRules!);
+
+        engine.SaveRuleToPolicy(new ApprovalRule { Tools = ["test"] }, "test");
+        Assert.Equal(2, JsonNode.Parse(File.ReadAllText(exeFile))!["user_rules"]!.AsArray().Count);
+        Assert.False(Directory.Exists(_userDir));
     }
 
     // -- Config type preservation -------------------------------------

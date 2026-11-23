@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Targets .NET 10 (`net10.0`) instead of .NET 9, and always runs on the newest installed .NET runtime (`LatestMajor`) so it can evaluate projects with a newer .NET SDK.
 - `System.Configuration.ConfigurationManager` is updated to 10.0.15.
+- Policy rules approved via elicitation are saved to `%LOCALAPPDATA%\mcp-tools\msbuild-mcp-policy.json` unless a policy file is configured (`--policy` or `MSBUILD_MCP_POLICY`) or `msbuild-mcp-policy.json` already exists next to the executable. Previously they were saved next to the executable, where an upgrade or reinstall that replaced the install directory lost them, and saving failed if that directory was not writable. That per-user file is also read at startup.
 
 ### Fixed
 

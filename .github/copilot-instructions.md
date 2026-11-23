@@ -51,7 +51,7 @@ src/McpSharp/
 ├── McpTypes.cs       # ToolInfo, ResourceInfo, PromptInfo, ElicitationCapabilities/Result
 ├── Progress.cs       # IProgressReporter, McpProgress (ambient), ProgressSession (keepalive)
 ├── Elicitation/      # Form-mode engine: FormSchemaBuilder, ElicitationPlanner, ElicitationDriver, FormValidator
-└── Policy/           # PolicyEngine, PolicyDispatch, PolicyConfig, IToolClassifier/IRuleMatcher/IOptionGenerator
+└── Policy/           # PolicyEngine, PolicyDispatch, PolicyConfig, PolicyFileLocator, IToolClassifier/IRuleMatcher/IOptionGenerator
 ```
 
 ## Key Design Decisions
@@ -128,6 +128,9 @@ The transport auto-detects Content-Length vs NDJSON framing from the first non-w
 
 ### Progress Reporting (`McpProgress`)
 Long-running `tools/call` handlers report progress via the ambient `McpProgress.Current` — `Report(...)` (push) or `SetStatusProvider(...)` (pull). The transport runs a per-call keepalive timer (heartbeat + change-dedupe + idle backstop) whenever the client sends a `progressToken`, so client timeouts don't fire during long operations. It is a no-op when no token is present, so handlers can report unconditionally.
+
+### Policy File Location (`PolicyFileLocator`)
+`PolicyFileLocator.Resolve` picks the one file a server both reads its policy from and saves approved rules to: explicit path (`--policy`) → env var (`HYPERV_MCP_POLICY` / `MSBUILD_MCP_POLICY`) → an *existing* `<name>-policy.json` next to the executable → `%LOCALAPPDATA%\mcp-tools\<name>-policy.json`. Saves create the file and its directory. New rules therefore land outside the install directory, which may be read-only or replaced on upgrade. When a server passes no `defaultFileName`, `PolicyEngine` uses `<entry assembly name>-policy.json`, so servers never share one per-user file (and therefore never share approved rules). `PolicyEngine.Load` and HyperVMcp's `Program.LoadHyperVConfig` both use it; tests pass a `PolicyFileLocator` with temp directories so they never touch the real install directory or user profile.
 
 ## Code Conventions
 

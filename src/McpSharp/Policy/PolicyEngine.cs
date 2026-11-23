@@ -1,6 +1,7 @@
 // Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -17,6 +18,7 @@ public sealed class PolicyEngine
     private readonly IRuleMatcher _matcher;
     private readonly string? _policyFilePath;
     private readonly string _defaultFileName;
+    private readonly PolicyFileLocator _fileLocator;
     private readonly object _fileLock = new();
 
     // Plain reference field (no `volatile`). The volatile semantics that
@@ -35,33 +37,60 @@ public sealed class PolicyEngine
     public PolicyConfig Config => _config;
     public string? PolicyFilePath => _policyFilePath;
 
+    /// <param name="policyFilePath">
+    /// File that rules are saved to. When null, the file is resolved by
+    /// <paramref name="fileLocator"/> from <paramref name="defaultFileName"/>
+    /// at save time.
+    /// </param>
+    /// <param name="fileLocator">Defaults to <see cref="PolicyFileLocator.Default"/>.</param>
     public PolicyEngine(PolicyConfig config, IToolClassifier classifier,
         IRuleMatcher matcher, string? policyFilePath = null,
-        string? defaultFileName = null)
+        string? defaultFileName = null, PolicyFileLocator? fileLocator = null)
     {
         _config = config;
         _classifier = classifier;
         _matcher = matcher;
         _policyFilePath = policyFilePath;
-        _defaultFileName = defaultFileName ?? "policy.json";
+        _defaultFileName = defaultFileName ?? DefaultFileName;
+        _fileLocator = fileLocator ?? PolicyFileLocator.Default;
     }
+
+    /// <summary>
+    /// Policy file name used when no <c>defaultFileName</c> is given:
+    /// <c>&lt;entry assembly name&gt;-policy.json</c>, so servers sharing the
+    /// per-user directory don't share rules.
+    /// </summary>
+    internal static string DefaultFileName { get; } =
+        DefaultFileNameFor(Assembly.GetEntryAssembly()?.GetName().Name);
+
+    internal static string DefaultFileNameFor(string? entryAssemblyName)
+        => string.IsNullOrWhiteSpace(entryAssemblyName)
+            ? "policy.json"
+            : $"{entryAssemblyName}-policy.json";
 
     // -- Loading -------------------------------------------------------------
 
+    /// <summary>
+    /// Loads the policy from the file resolved by <see cref="PolicyFileLocator.Resolve"/>
+    /// (explicit path → environment variable → existing file next to the
+    /// executable → per-user file). Rules are later saved to the same file.
+    /// </summary>
+    /// <param name="fileLocator">Defaults to <see cref="PolicyFileLocator.Default"/>.</param>
     public static PolicyEngine Load<TConfig>(
         IToolClassifier classifier,
         IRuleMatcher matcher,
         string? explicitPath = null,
         string? envVarName = null,
-        string? defaultFileName = null)
+        string? defaultFileName = null,
+        PolicyFileLocator? fileLocator = null)
         where TConfig : PolicyConfig, new()
     {
-        var path = explicitPath
-            ?? (envVarName != null ? Environment.GetEnvironmentVariable(envVarName) : null)
-            ?? FindPolicyFileNextToExe(defaultFileName ?? "policy.json");
+        fileLocator ??= PolicyFileLocator.Default;
+        var fileName = defaultFileName ?? DefaultFileName;
+        var path = fileLocator.Resolve(explicitPath, envVarName, fileName);
 
         PolicyConfig config;
-        if (path != null && File.Exists(path))
+        if (File.Exists(path))
         {
             try
             {
@@ -78,22 +107,20 @@ public sealed class PolicyEngine
         }
         else
         {
-            Console.Error.WriteLine("policy: no policy file found, using defaults");
+            Console.Error.WriteLine($"policy: no policy file found, using defaults (rules will be saved to {path})");
             config = new TConfig();
         }
 
         return new PolicyEngine(config, classifier, matcher, path,
-            defaultFileName: defaultFileName ?? "policy.json");
+            defaultFileName: fileName, fileLocator: fileLocator);
     }
 
+    /// <summary>
+    /// Default location for a new policy file: the per-user
+    /// <c>%LOCALAPPDATA%\mcp-tools\</c> directory.
+    /// </summary>
     public static string DefaultPolicyFilePath(string fileName)
-        => Path.Combine(AppContext.BaseDirectory, fileName);
-
-    private static string? FindPolicyFileNextToExe(string fileName)
-    {
-        var candidate = Path.Combine(AppContext.BaseDirectory, fileName);
-        return File.Exists(candidate) ? candidate : null;
-    }
+        => PolicyFileLocator.Default.UserFilePath(fileName);
 
     // -- Evaluation ----------------------------------------------------------
 
@@ -170,10 +197,14 @@ public sealed class PolicyEngine
     private void SaveRuleInternal(ApprovalRule rule, string? reason, bool isDeny)
     {
         var filePath = _policyFilePath
-            ?? DefaultPolicyFilePath(_defaultFileName);
+            ?? _fileLocator.Resolve(null, null, _defaultFileName);
 
         lock (_fileLock)
         {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(filePath));
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+
             // Read existing file as JSON tree to preserve all fields (including
             // server-specific config like build_constraints, vm_allowlist, etc.).
             JsonObject root;
