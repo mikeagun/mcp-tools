@@ -98,7 +98,7 @@ public static class Program
             defaultFileName: "hyperv-mcp-policy.json");
 
         // Create MCP server and register tools.
-        var server = new McpServer("hyperv-mcp");
+        var server = new McpServer("hyperv-mcp", McpServer.VersionOf(typeof(Program).Assembly));
         ToolRegistration.RegisterAll(server, sessionManager, vmManager, commandRunner, fileTransferManager);
 
         // Bind to stdio and enter event loop.

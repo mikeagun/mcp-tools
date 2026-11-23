@@ -42,6 +42,38 @@ dotnet publish src/MsBuildMcp -c Release -o publish/msbuild-mcp
 dotnet publish src/ElicitMcp -c Release -o publish/elicit-mcp
 ```
 
+## Packaging and Releases
+
+Each MCP server is also packed as a [.NET tool](https://learn.microsoft.com/dotnet/core/tools/global-tools) NuGet package (`Mikeagun.McpTools.HyperVMcp`, `.CiDebugMcp`, `.MsBuildMcp`, `.ElicitMcp`). Each server produces a framework-dependent package per runtime (`win-x64`, `win-arm64`) plus a platform-agnostic package that points to them:
+
+```bash
+dotnet pack src/HyperVMcp -c Release -o artifacts/packages
+# Mikeagun.McpTools.HyperVMcp.<version>.nupkg
+# Mikeagun.McpTools.HyperVMcp.win-x64.<version>.nupkg
+# Mikeagun.McpTools.HyperVMcp.win-arm64.<version>.nupkg
+```
+
+The packages require the .NET 10 runtime or later. Install a downloaded package from a local folder with `dotnet tool install`, or run it directly with `dnx` (.NET 10 SDK or later):
+
+```bash
+dotnet tool install --global Mikeagun.McpTools.HyperVMcp --add-source <folder>
+dnx Mikeagun.McpTools.HyperVMcp --source <folder> --yes
+```
+
+`scripts/Test-ToolPackage.ps1` extracts the packages for a runtime, starts each server, and checks that its MCP `initialize` response reports the expected server name and the package version. CI runs it for `win-x64` and `win-arm64` on every build.
+
+### Versioning and releases
+
+The servers are versioned and released independently. Each server's version is the `<Version>` in its project file, and its changes are recorded in its own `CHANGELOG.md` (see [CHANGELOG.md](CHANGELOG.md) for the list).
+
+To release a server:
+
+1. In a pull request, set the server's `<Version>` and rename the `## [Unreleased]` heading in its `CHANGELOG.md` to `## [<version>] - <date>` (adding a new empty `## [Unreleased]` above it). Several servers can be released from one pull request.
+2. After it merges, push a tag `<server>-v<version>` on the merge commit for each server, for example `msbuild-mcp-v0.2.0`. Push each tag with its own command (`git push origin msbuild-mcp-v0.2.0`): GitHub starts no workflow runs when more than three tags are pushed at once.
+3. The [Release workflow](.github/workflows/release.yml) checks that the tag matches the server's `<Version>` and changelog, builds, tests, packs, smoke-tests the `win-x64` and `win-arm64` packages, and creates a GitHub Release named `<server> <version>` with that changelog section as its notes and the packages attached.
+
+Running the Release workflow manually on a branch packs one or all servers as `<version>-ci.<run>` prerelease packages, available as a workflow artifact. Running it manually on a release tag (selecting the tag as the workflow's ref) releases that tag's server, ignoring the server choice — use this if a tag push did not start a release. `scripts/Get-ReleaseInfo.ps1` lists the servers and versions, and validates a release tag locally (`./scripts/Get-ReleaseInfo.ps1 -Tag msbuild-mcp-v0.2.0`).
+
 ## Repository Structure
 
 ```
@@ -60,6 +92,8 @@ mcp-tools/
 │   ├── MsBuildMcp.Tests/
 │   └── ElicitMcp.Tests/
 ├── docs/                        # Guides (creating a new server, etc.)
+├── scripts/                     # Release tooling (package smoke test)
+├── Directory.Build.props        # Shared package metadata
 ├── .github/
 │   ├── skills/                  # Copilot skill definitions
 │   ├── prompts/                 # VS Code prompt wrappers

@@ -5,6 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>HyperVMcp</RootNamespace>
     <AssemblyName>hyperv-mcp</AssemblyName>
+    <Version>0.1.0</Version>
     <AssemblyTitle>Hyper-V MCP Server</AssemblyTitle>
     <Product>Hyper-V MCP Server</Product>
     <Description>MCP server for Hyper-V virtual machine management</Description>
@@ -14,6 +15,22 @@
     <!-- Run on a newer major runtime when the targeted one is not installed. -->
     <RollForward>Major</RollForward>
   </PropertyGroup>
+
+  <PropertyGroup Label="Packaging">
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <PackageId>Mikeagun.McpTools.HyperVMcp</PackageId>
+    <ToolCommandName>hyperv-mcp</ToolCommandName>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- One framework-dependent package per runtime plus a platform-agnostic package that points at them. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <ToolPackageRuntimeIdentifiers>win-x64;win-arm64</ToolPackageRuntimeIdentifiers>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="HyperVMcp.Tests" />

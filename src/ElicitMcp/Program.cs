@@ -35,7 +35,7 @@ public static class Program
     public static (McpServer server, McpTransport transport) BuildServer(
         Stream input, Stream output, bool demoMode = false)
     {
-        var server = new McpServer("elicit-mcp");
+        var server = new McpServer("elicit-mcp", McpServer.VersionOf(typeof(Program).Assembly));
         ToolRegistration.RegisterAll(server, demoMode);
 
         var transport = new McpTransport(input, output, "elicit-mcp");

@@ -191,6 +191,40 @@ public class McpServerTests
         Assert.Equal("1.2.3", result["serverInfo"]!["version"]!.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData("1.2.0+0123456789abcdef", "1.2.0")]
+    [InlineData("1.2.0-ci.5+0123456789abcdef", "1.2.0-ci.5")]
+    [InlineData("2.0.0", "2.0.0")]
+    public void VersionOf_UsesInformationalVersionWithoutBuildMetadata(string informational, string expected)
+    {
+        var assembly = CreateAssembly(new Version(9, 9, 9, 9), informational);
+
+        Assert.Equal(expected, McpServer.VersionOf(assembly));
+    }
+
+    [Fact]
+    public void VersionOf_FallsBackToAssemblyVersion()
+    {
+        var assembly = CreateAssembly(new Version(3, 4, 5, 6), informationalVersion: null);
+
+        Assert.Equal("3.4.5", McpServer.VersionOf(assembly));
+    }
+
+    private static System.Reflection.Assembly CreateAssembly(Version version, string? informationalVersion)
+    {
+        var name = new System.Reflection.AssemblyName("VersionOfTest" + Guid.NewGuid().ToString("N")) { Version = version };
+        var attributes = informationalVersion == null
+            ? Array.Empty<System.Reflection.Emit.CustomAttributeBuilder>()
+            : new[]
+            {
+                new System.Reflection.Emit.CustomAttributeBuilder(
+                    typeof(System.Reflection.AssemblyInformationalVersionAttribute).GetConstructor(new[] { typeof(string) })!,
+                    new object[] { informationalVersion }),
+            };
+        return System.Reflection.Emit.AssemblyBuilder.DefineDynamicAssembly(
+            name, System.Reflection.Emit.AssemblyBuilderAccess.Run, attributes);
+    }
+
     [Fact]
     public void Initialize_ReturnsCapabilities()
     {

@@ -9,10 +9,26 @@
     <!-- Run on a newer major runtime when the targeted one is not installed. -->
     <RollForward>Major</RollForward>
     <AssemblyName>ci-debug-mcp</AssemblyName>
-    <RootNamespace>CiDebugMcp</RootNamespace>
     <Version>0.1.0</Version>
+    <RootNamespace>CiDebugMcp</RootNamespace>
     <Description>MCP server for CI/CD log search, failure triage, and binary dependency analysis.</Description>
   </PropertyGroup>
+
+  <PropertyGroup Label="Packaging">
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <PackageId>Mikeagun.McpTools.CiDebugMcp</PackageId>
+    <ToolCommandName>ci-debug-mcp</ToolCommandName>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- One framework-dependent package per runtime plus a platform-agnostic package that points at them. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <ToolPackageRuntimeIdentifiers>win-x64;win-arm64</ToolPackageRuntimeIdentifiers>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\McpSharp\McpSharp.csproj" />

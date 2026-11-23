@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -11,17 +11,28 @@
          .NET 11 SDK needs this server on the .NET 11 runtime to evaluate projects. -->
     <RollForward>LatestMajor</RollForward>
     <AssemblyName>msbuild-mcp</AssemblyName>
-    <RootNamespace>MsBuildMcp</RootNamespace>
     <Version>0.1.0</Version>
+    <RootNamespace>MsBuildMcp</RootNamespace>
     <Description>MCP server that gives LLM agents structured access to MSBuild solutions, projects, dependency graphs, and build execution.</Description>
-    <Authors>Microsoft</Authors>
-    <PackageProjectUrl>https://github.com/microsoft/mcp-tools</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/microsoft/mcp-tools</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <!-- Microsoft.Build 17.x compile-time reference; actual MSBuild comes from MSBuildLocator at runtime -->
     <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
+
+  <PropertyGroup Label="Packaging">
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <PackageId>Mikeagun.McpTools.MsBuildMcp</PackageId>
+    <ToolCommandName>msbuild-mcp</ToolCommandName>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- One framework-dependent package per runtime plus a platform-agnostic package that points at them. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <ToolPackageRuntimeIdentifiers>win-x64;win-arm64</ToolPackageRuntimeIdentifiers>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="MsBuildMcp.Tests" />

@@ -55,6 +55,27 @@ public sealed class McpServer
     }
 
     /// <summary>
+    /// Returns the version to report for <paramref name="assembly"/>: its informational
+    /// version (e.g. <c>1.2.0-ci.5</c>) without build metadata such as the <c>+commit</c>
+    /// suffix the SDK appends, falling back to the three-part assembly version. Servers pass
+    /// <c>VersionOf(typeof(Program).Assembly)</c> so <c>initialize</c> reports their own
+    /// version rather than McpSharp's.
+    /// </summary>
+    public static string VersionOf(System.Reflection.Assembly assembly)
+    {
+        var informational = assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+            .FirstOrDefault()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(informational))
+        {
+            var plus = informational.IndexOf('+');
+            return plus >= 0 ? informational[..plus] : informational;
+        }
+        return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+    }
+
+    /// <summary>
     /// Optional filter invoked during <c>tools/list</c> and <c>tools/call</c>.
     /// Return true to include the tool for the requesting client.
     /// Receives the tool and the parsed per-request context (client caps, protocol version).

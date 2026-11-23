@@ -62,6 +62,12 @@ Changes to `src/McpSharp/` affect all four servers. Ensure all test suites pass:
 dotnet test
 ```
 
+### Changelogs and Versions
+
+Each component has its own changelog: `src/<Server>/CHANGELOG.md` for the servers and `src/McpSharp/CHANGELOG.md` for the shared library. Add user-visible changes under `## [Unreleased]` in the changelog of each component you change. A McpSharp change that alters a server's behavior also gets an entry in that server's changelog.
+
+The servers are versioned and released independently, so don't change a server's `<Version>` in a regular pull request. Releases are cut separately — see "Versioning and releases" in the [README](README.md).
+
 ### Code Style
 
 - Follow existing patterns in the codebase
@@ -99,6 +105,7 @@ All tests must pass before submitting a PR. Tests should be self-contained — t
 - [ ] No new warnings (`dotnet build`)
 - [ ] New tools/features have tests
 - [ ] README updated if adding tools or changing behavior
+- [ ] Component `CHANGELOG.md` updated for user-visible changes
 - [ ] Commit messages are clear and descriptive
 
 ## Reporting Issues

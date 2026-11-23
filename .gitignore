@@ -34,3 +34,6 @@ coverage/
 
 ## Publish output
 publish/
+
+## Package output
+artifacts/
