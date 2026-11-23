@@ -16,6 +16,16 @@ namespace HyperVMcp.Engine;
 /// </summary>
 public sealed class HyperVToolClassifier : IToolClassifier
 {
+    private static readonly HashSet<string> CommandContextTools =
+    [
+        "get_command_status",
+        "cancel_command",
+        "search_command_output",
+        "get_command_output",
+        "save_command_output",
+        "free_command_output",
+    ];
+
     private readonly HyperVPolicyConfig _config;
 
     // Compiled regex patterns (lazily built from config).
@@ -32,17 +42,20 @@ public sealed class HyperVToolClassifier : IToolClassifier
     public Func<string, string?>? SessionVmResolver { get; set; }
 
     /// <summary>
-    /// Optional resolver that maps command IDs to session IDs.
-    /// Set during server startup to enable VM-scoped policy for command-based tools
-    /// like cancel_command and free_command_output.
+    /// Optional resolver that maps command IDs to immutable retained-job context.
+    /// Set during server startup to preserve VM-scoped policy after a live session
+    /// is removed.
     /// </summary>
-    public Func<string, string?>? CommandSessionResolver { get; set; }
+    public Func<string, CommandPolicyContext?>? CommandContextResolver { get; set; }
 
     public HyperVToolClassifier(HyperVPolicyConfig config)
     {
         _config = config;
         CompilePatterns();
     }
+
+    internal static bool UsesCommandContext(string toolName)
+        => CommandContextTools.Contains(toolName);
 
     /// <summary>
     /// Default policy decision for this tool call based on risk tier and policy mode.
@@ -258,12 +271,17 @@ public sealed class HyperVToolClassifier : IToolClassifier
                 vmNames = [computerName];
         }
 
-        // Resolve command_id to session_id for command-based tools.
-        if (sessionId == null && CommandSessionResolver != null)
+        // Resolve command_id directly to immutable retained-job context. This
+        // overrides caller-supplied session/VM fields for command-based tools.
+        if (UsesCommandContext(toolName) && CommandContextResolver != null)
         {
             var commandId = args["command_id"]?.GetValue<string>();
             if (commandId != null)
-                sessionId = CommandSessionResolver(commandId);
+            {
+                var commandContext = CommandContextResolver(commandId);
+                sessionId = commandContext?.SessionId;
+                vmNames = commandContext == null ? null : [commandContext.VmName];
+            }
         }
 
         // Resolve session_id to VM name if no vm_name was provided directly.

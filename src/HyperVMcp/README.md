@@ -107,18 +107,18 @@ With a custom policy file:
 | Tool | Description |
 |------|-------------|
 | `invoke_command` | Execute PowerShell on a VM with timeout and streaming output |
-| `get_command_status` | Poll a running command for new output or completion |
-| `cancel_command` | Cancel a running command |
+| `get_command_status` | Poll a running command or transfer job for output or completion |
+| `cancel_command` | Cancel a running command or transfer job |
 | `run_script` | Execute a `.ps1` script file on a VM |
 
 ### Output Management
 
 | Tool | Description |
 |------|-------------|
-| `search_command_output` | Regex search over a command's retained output |
-| `get_command_output` | View output by line range, tail, or centered on a pattern match |
-| `save_command_output` | Write a command's output to a file on the host |
-| `free_command_output` | Release output buffer to free memory |
+| `search_command_output` | Regex search over a command or transfer job's retained output |
+| `get_command_output` | View job output by line range, tail, or centered on a pattern match |
+| `save_command_output` | Write a command or transfer job's output to a file on the host |
+| `free_command_output` | Release a command or transfer job's output buffer |
 
 ### File Transfer
 
@@ -151,6 +151,11 @@ Approve stop_vm: VM=test-vm
 ```
 
 Session approvals last until the server restarts. Permanent approvals are saved to the policy file.
+Here, "this session" means the HyperVMcp server-process lifetime, not the lifetime
+of an individual VM PowerShell session. Retained command and transfer jobs keep their
+originating VM identity after disconnect, so VM-scoped approvals, denials, and blocklists
+continue to apply to `get_command_status`, `cancel_command`, `search_command_output`,
+`get_command_output`, `save_command_output`, and `free_command_output`.
 
 ### Tool Risk Tiers
 

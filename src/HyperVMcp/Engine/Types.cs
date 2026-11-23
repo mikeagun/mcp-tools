@@ -45,7 +45,7 @@ public enum SessionStatus
 }
 
 /// <summary>
-/// Tracks a long-running command executed on a VM.
+/// Tracks an asynchronous VM command or host-side transfer job.
 /// </summary>
 public sealed class CommandJob : IDisposable
 {
@@ -56,6 +56,8 @@ public sealed class CommandJob : IDisposable
 
     public string CommandId { get; }
     public string SessionId { get; }
+    /// <summary>The immutable VM or remote computer identity used for policy evaluation.</summary>
+    public string VmName { get; }
     public string Command { get; }
     public DateTime StartedAt { get; } = DateTime.UtcNow;
     public CommandStatus Status { get; private set; } = CommandStatus.Running;
@@ -71,11 +73,21 @@ public sealed class CommandJob : IDisposable
     /// <summary>Error buffer (stderr). Always full mode, typically small.</summary>
     public OutputBuffer Errors { get; }
 
-    public CommandJob(string commandId, string sessionId, string command,
+    /// <summary>
+    /// Creates a retained command or transfer job.
+    /// </summary>
+    /// <param name="commandId">The process-local job identifier.</param>
+    /// <param name="sessionId">The session that originated the job.</param>
+    /// <param name="vmName">The VM or remote computer targeted by the job.</param>
+    /// <param name="command">The command text or transfer description.</param>
+    /// <param name="outputMode">The output retention mode.</param>
+    /// <param name="saveTo">An optional file that receives streamed output.</param>
+    public CommandJob(string commandId, string sessionId, string vmName, string command,
         string outputMode = "full", string? saveTo = null)
     {
         CommandId = commandId;
         SessionId = sessionId;
+        VmName = vmName;
         Command = command;
         Output = new OutputBuffer(outputMode, saveTo);
         Errors = new OutputBuffer("full"); // errors are always small, keep all
