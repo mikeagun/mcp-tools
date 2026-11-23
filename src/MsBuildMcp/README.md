@@ -15,7 +15,7 @@ Instead of having LLM agents parse `.vcxproj` XML with regex or grep through raw
 
 ### Prerequisites
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - [Visual Studio 2022 or later](https://visualstudio.microsoft.com/) (or Build Tools) with C++ workload (for C++ project evaluation and building)
 
 ### Install
@@ -344,7 +344,7 @@ Tests are located at `tests/MsBuildMcp.Tests/`.
 
 **Evaluation over parsing**: Never regex-parse `.vcxproj` XML. Uses `Microsoft.Build.Evaluation.Project` which correctly handles property inheritance, conditional evaluation, import chains, and NuGet targets.
 
-**Dual MSBuild strategy**: The in-process evaluation API uses the .NET SDK's MSBuild (with working SDK resolvers for .NET 9) plus Visual Studio's `VCTargetsPath` (for C++ project support). The build subprocess uses Visual Studio's `MSBuild.exe` directly. Both come from the same `vswhere`-discovered installation, selected by `--vs` / `MSBUILD_MCP_VS` (see [Selecting a Visual Studio Version](#selecting-a-visual-studio-version)).
+**Dual MSBuild strategy**: The in-process evaluation API uses the .NET SDK's MSBuild (with working .NET SDK resolvers) plus Visual Studio's `VCTargetsPath` (for C++ project support). The build subprocess uses Visual Studio's `MSBuild.exe` directly. Both come from the same `vswhere`-discovered installation, selected by `--vs` / `MSBUILD_MCP_VS` (see [Selecting a Visual Studio Version](#selecting-a-visual-studio-version)).
 
 **Async build model**: Builds run in a background process with streaming output parsing. The `build` tool returns early on new errors (so agents can cancel and fix without waiting), and streams live progress (lines parsed + projects completed) to clients that pass a `progressToken`. Output is retained in `full` mode by default (up to 50 MB in memory with lazy spill-to-disk); a lightweight `tail` mode keeps only the last 1000 lines.
 

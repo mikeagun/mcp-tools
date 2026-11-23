@@ -2,10 +2,12 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Run on a newer major runtime when the targeted one is not installed. -->
+    <RollForward>Major</RollForward>
     <AssemblyName>ci-debug-mcp</AssemblyName>
     <RootNamespace>CiDebugMcp</RootNamespace>
     <Version>0.1.0</Version>

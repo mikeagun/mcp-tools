@@ -4,7 +4,7 @@ MCP server for CI/CD failure investigation across **GitHub Actions** and **Azure
 
 ## Prerequisites
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - CI provider authentication (see [Authentication](#authentication) below)
 
 ## Building

@@ -40,10 +40,10 @@ public sealed class ProjectEngine : IDisposable
         {
             if (!_locatorRegistered)
             {
-                // Strategy: use dotnet SDK MSBuild (has working .NET 9 SDK resolvers for
+                // Strategy: use dotnet SDK MSBuild (has working .NET SDK resolvers for
                 // <Sdk Name="..."/> imports) + VS VCTargetsPath (for C++ project evaluation).
                 //
-                // VS MSBuild's SDK resolvers target .NET Framework and can't load in our .NET 9
+                // VS MSBuild's SDK resolvers target .NET Framework and can't load in our .NET
                 // host process. But the dotnet SDK MSBuild evaluates C++ projects fine when
                 // VCTargetsPath is set as an environment variable.
 
