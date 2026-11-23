@@ -461,6 +461,7 @@ Exceptions thrown by tool handlers are caught by McpServer and returned as MCP e
 - **ItemDefinitionGroup**: ClCompile/Link/Lib/Midl metadata is only extracted for C++ projects (projects with `ClCompile` items). WiX and C# projects skip this to avoid spurious inherited settings.
 - **Central Package Management (CPM)**: When `PackageReference` has no Version, check `PackageVersion` items from `Directory.Packages.props`. See `ExtractPackageReferences()`.
 - **Build collision**: Only one build runs at a time. If a build is already running, the `build` tool polls it instead of starting a new one, and reports a `collision` if targets or the Visual Studio installation differ.
+- **Host architecture**: `MSBuild.exe` and the `vcvarsall` argument follow the OS architecture (`RuntimeInformation.OSArchitecture`), not the process architecture, so an emulated x64 server on ARM64 still uses native ARM64 tools. `vcvarsall.bat` exits 0 even when the requested host toolset is missing, so the ARM64 capture checks for `cl.exe` under `VCToolsInstallDir` before falling back to `amd64`. CiDebugMcp's `dumpbin.exe` lookup uses the same host-architecture preference.
 
 ---
 

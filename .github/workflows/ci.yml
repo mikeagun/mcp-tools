@@ -39,3 +39,32 @@ jobs:
         with:
           name: test-results-${{ matrix.configuration }}
           path: '**/test-results.trx'
+
+  # Runs the suite on an ARM64 host. The MsBuildMcp tests that start real builds use the native
+  # ARM64 Visual Studio tools there (MSBuild.exe and the vcvarsall environment).
+  build-and-test-arm64:
+    runs-on: windows-11-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c Release --warnaserror
+
+      - name: Test
+        run: dotnet test --no-build -c Release --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-arm64
+          path: '**/test-results.trx'

@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace MsBuildMcp.Engine;
 
@@ -90,7 +91,18 @@ public sealed class VsToolchainProvider
         }
     }
 
-    internal static VsToolchain CaptureToolchain(VsInstance instance)
+    internal static VsToolchain CaptureToolchain(VsInstance instance) =>
+        CaptureToolchain(instance, VsLocator.HostArchitecture, RunVcvarsall);
+
+    /// <summary>
+    /// vcvarsall.bat architecture arguments to try, in order. ARM64 hosts prefer the native
+    /// <c>arm64</c> toolset and fall back to <c>amd64</c> (emulated x64 tools) when it isn't installed.
+    /// </summary>
+    internal static string[] VcvarsArchitectures(Architecture hostArch) =>
+        hostArch == Architecture.Arm64 ? ["arm64", "amd64"] : ["amd64"];
+
+    internal static VsToolchain CaptureToolchain(VsInstance instance, Architecture hostArch,
+        Func<string, string, (int ExitCode, Dictionary<string, string> Environment)> runVcvarsall)
     {
         Console.Error.WriteLine($"msbuild-mcp: capturing build toolchain for {instance.Describe()}");
 
@@ -102,10 +114,52 @@ public sealed class VsToolchainProvider
             throw new FileNotFoundException(
                 "vcvarsall.bat not found — VC++ build tools may not be installed", vcvarsall);
 
+        var archs = VcvarsArchitectures(hostArch);
+        for (var i = 0; ; i++)
+        {
+            var arch = archs[i];
+            var isLast = i == archs.Length - 1;
+            var (exitCode, env) = runVcvarsall(vcvarsall, arch);
+            if (exitCode != 0)
+            {
+                if (isLast)
+                    throw new InvalidOperationException(
+                        $"vcvarsall.bat {arch} failed (exit code {exitCode}) for {instance.Describe()}");
+                Console.Error.WriteLine(
+                    $"msbuild-mcp: vcvarsall.bat {arch} failed (exit code {exitCode}); falling back to {archs[i + 1]}");
+                continue;
+            }
+
+            // vcvarsall succeeds even when the requested host toolset isn't installed (its bin
+            // directory is added to PATH only if present), so check for the compiler explicitly.
+            if (!isLast && !HasCompiler(env, arch))
+            {
+                Console.Error.WriteLine(
+                    $"msbuild-mcp: {arch} C++ build tools not installed; falling back to {archs[i + 1]}");
+                continue;
+            }
+
+            Console.Error.WriteLine($"msbuild-mcp: MSBuild: {msbuildPath}");
+            Console.Error.WriteLine($"msbuild-mcp: captured {env.Count} environment variables from vcvarsall {arch}");
+            return new VsToolchain(instance, msbuildPath, env);
+        }
+    }
+
+    /// <summary>Whether the vcvarsall environment's toolset has the host-native <c>cl.exe</c> for <paramref name="arch"/>.</summary>
+    internal static bool HasCompiler(IReadOnlyDictionary<string, string> env, string arch)
+    {
+        if (!env.TryGetValue("VCToolsInstallDir", out var toolsDir) || string.IsNullOrEmpty(toolsDir))
+            return false;
+        var (host, target) = arch == "arm64" ? ("HostARM64", "arm64") : ("Hostx64", "x64");
+        return File.Exists(Path.Combine(toolsDir, "bin", host, target, "cl.exe"));
+    }
+
+    private static (int ExitCode, Dictionary<string, string> Environment) RunVcvarsall(string vcvarsall, string arch)
+    {
         var psi = new ProcessStartInfo
         {
             FileName = "cmd.exe",
-            Arguments = $"/c \"\"{vcvarsall}\" amd64 && set\"",
+            Arguments = $"/c \"\"{vcvarsall}\" {arch} && set\"",
             RedirectStandardOutput = true,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -119,13 +173,6 @@ public sealed class VsToolchainProvider
                 env[line[..eq]] = line[(eq + 1)..];
         }
         envProc.WaitForExit();
-        if (envProc.ExitCode != 0)
-            throw new InvalidOperationException(
-                $"vcvarsall.bat failed (exit code {envProc.ExitCode}) for {instance.Describe()}");
-
-        Console.Error.WriteLine($"msbuild-mcp: MSBuild: {msbuildPath}");
-        Console.Error.WriteLine($"msbuild-mcp: captured {env.Count} environment variables from vcvarsall");
-
-        return new VsToolchain(instance, msbuildPath, env);
+        return (envProc.ExitCode, env);
     }
 }

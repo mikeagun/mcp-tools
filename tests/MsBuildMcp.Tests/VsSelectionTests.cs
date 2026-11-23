@@ -1,6 +1,7 @@
 // Copyright (c) McpSharp contributors
 // SPDX-License-Identifier: MIT
 
+using System.Runtime.InteropServices;
 using MsBuildMcp.Engine;
 using MsBuildMcp.Tools;
 
@@ -143,6 +144,111 @@ public class VsSelectionTests : IDisposable
         Directory.CreateDirectory(Path.Combine(_tempDir, @"MSBuild\Microsoft\VC\v170"));
         Assert.Null(VsLocator.FindVcTargetsPath(_tempDir));
         Assert.Null(VsLocator.FindVcTargetsPath(Path.Combine(_tempDir, "missing")));
+    }
+
+    private void CreateFile(string relativePath)
+    {
+        var path = Path.Combine(_tempDir, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "");
+    }
+
+    [Theory]
+    [InlineData(Architecture.X64, new[] { "arm64", "amd64", "" }, "amd64")]
+    [InlineData(Architecture.X64, new[] { "arm64", "" }, "")]
+    [InlineData(Architecture.Arm64, new[] { "arm64", "amd64", "" }, "arm64")]
+    [InlineData(Architecture.Arm64, new[] { "amd64", "" }, "amd64")]
+    [InlineData(Architecture.Arm64, new[] { "" }, "")]
+    public void FindMsBuildExe_PrefersHostNativeBuild(Architecture hostArch, string[] binDirs, string expectedDir)
+    {
+        foreach (var dir in binDirs)
+            CreateFile(Path.Combine(@"MSBuild\Current\Bin", dir, "MSBuild.exe"));
+
+        Assert.Equal(Path.Combine(_tempDir, @"MSBuild\Current\Bin", expectedDir, "MSBuild.exe"),
+            VsLocator.FindMsBuildExe(_tempDir, hostArch));
+    }
+
+    [Fact]
+    public void FindMsBuildExe_NotInstalled_ReturnsNull()
+    {
+        Assert.Null(VsLocator.FindMsBuildExe(_tempDir, Architecture.Arm64));
+    }
+
+    private VsInstance FakeInstanceWithVcvarsall()
+    {
+        CreateFile(@"VC\Auxiliary\Build\vcvarsall.bat");
+        return new VsInstance
+        {
+            InstallationPath = _tempDir,
+            InstallationVersion = "17.14.0.0",
+            Version = new Version(17, 14),
+            MsBuildPath = @"C:\fake\MSBuild.exe",
+        };
+    }
+
+    /// <summary>Fake vcvarsall runner: records the requested architectures and reports a toolset dir under the temp dir.</summary>
+    private Func<string, string, (int, Dictionary<string, string>)> FakeVcvarsall(List<string> calls, int exitCode = 0) =>
+        (_, arch) =>
+        {
+            calls.Add(arch);
+            return (exitCode, new Dictionary<string, string>
+            {
+                ["VCToolsInstallDir"] = Path.Combine(_tempDir, @"VC\Tools\MSVC\14.44.35207") + "\\",
+                ["Platform"] = arch,
+            });
+        };
+
+    [Fact]
+    public void CaptureToolchain_X64Host_UsesAmd64()
+    {
+        var calls = new List<string>();
+        var toolchain = VsToolchainProvider.CaptureToolchain(FakeInstanceWithVcvarsall(), Architecture.X64, FakeVcvarsall(calls));
+
+        Assert.Equal(["amd64"], calls);
+        Assert.Equal("amd64", toolchain.Environment["Platform"]);
+    }
+
+    [Fact]
+    public void CaptureToolchain_Arm64Host_UsesNativeToolsWhenInstalled()
+    {
+        CreateFile(@"VC\Tools\MSVC\14.44.35207\bin\HostARM64\arm64\cl.exe");
+        var calls = new List<string>();
+        var toolchain = VsToolchainProvider.CaptureToolchain(FakeInstanceWithVcvarsall(), Architecture.Arm64, FakeVcvarsall(calls));
+
+        Assert.Equal(["arm64"], calls);
+        Assert.Equal("arm64", toolchain.Environment["Platform"]);
+    }
+
+    [Fact]
+    public void CaptureToolchain_Arm64Host_FallsBackToAmd64WithoutNativeTools()
+    {
+        CreateFile(@"VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe");
+        var calls = new List<string>();
+        var toolchain = VsToolchainProvider.CaptureToolchain(FakeInstanceWithVcvarsall(), Architecture.Arm64, FakeVcvarsall(calls));
+
+        Assert.Equal(["arm64", "amd64"], calls);
+        Assert.Equal("amd64", toolchain.Environment["Platform"]);
+    }
+
+    [Fact]
+    public void CaptureToolchain_Arm64Host_FallsBackWhenNativeVcvarsallFails()
+    {
+        var calls = new List<string>();
+        var toolchain = VsToolchainProvider.CaptureToolchain(FakeInstanceWithVcvarsall(), Architecture.Arm64,
+            (_, arch) => { calls.Add(arch); return (arch == "arm64" ? 1 : 0, new() { ["Platform"] = arch }); });
+
+        Assert.Equal(["arm64", "amd64"], calls);
+        Assert.Equal("amd64", toolchain.Environment["Platform"]);
+    }
+
+    [Theory]
+    [InlineData(Architecture.X64)]
+    [InlineData(Architecture.Arm64)]
+    public void CaptureToolchain_AllVcvarsallFail_Throws(Architecture hostArch)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => VsToolchainProvider.CaptureToolchain(
+            FakeInstanceWithVcvarsall(), hostArch, FakeVcvarsall([], exitCode: 1)));
+        Assert.Contains("vcvarsall.bat amd64 failed (exit code 1)", ex.Message);
     }
 
     [Theory]

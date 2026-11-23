@@ -304,6 +304,18 @@ public class BuildRunnerTests
     // --- Concurrency invariant ---
 
     /// <summary>
+    /// Capture the shared build toolchain before the race so the barrier races the build-start
+    /// path, not the first vcvarsall capture. That capture takes seconds (longer on ARM64 runners)
+    /// and would otherwise count against the test timeout, or let a concurrent publish finish
+    /// first. Without Visual Studio the capture fails; StartOrPoll then throws, as before.
+    /// </summary>
+    private static void WarmToolchain(BuildManager manager)
+    {
+        try { manager.VisualStudio.GetToolchain(); }
+        catch { }
+    }
+
+    /// <summary>
     /// Adversarial regression test for the StartOrPoll race window.
     ///
     /// StartOrPoll holds <c>_lock</c> while checking whether a build is
@@ -335,6 +347,7 @@ public class BuildRunnerTests
     public async Task StartOrPoll_ConcurrentCalls_DoNotDoubleCreateBuild()
     {
         using var manager = new BuildManager();
+        WarmToolchain(manager);
         var bogusSln = Path.Combine(Path.GetTempPath(), $"bogus-{Guid.NewGuid():N}.sln");
         const int callers = 6;
 
@@ -403,6 +416,7 @@ public class BuildRunnerTests
     public async Task StartOrPoll_And_StartPublish_Concurrent_DoNotDoubleCreateBuild()
     {
         using var manager = new BuildManager();
+        WarmToolchain(manager);
         var bogusSln = Path.Combine(Path.GetTempPath(), $"bogus-{Guid.NewGuid():N}.sln");
         var bogusProj = Path.Combine(Path.GetTempPath(), $"bogus-{Guid.NewGuid():N}.csproj");
 
